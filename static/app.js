@@ -72,6 +72,10 @@ const state = {
   statsYear: new Date().getFullYear(),
   attClosed: {},
   statsClosed: {},
+  statsGroups: null,
+  statsKinds: null,
+  statsLabelCols: 0,
+  statsRendered: {},
 };
 
 async function loadMeta() { state.meta = await get('/api/meta'); }
@@ -724,7 +728,17 @@ function kindRowHTML(k, isNew) {
 }
 function renderSettings() {
   const el = $('#tab-settings');
-  let h = '<div class="toolbar"><h3>考勤类型设置</h3>' +
+  const multi = ((state.meta.settings || {}).multi_shift || '0') === '1';
+  let h = '<div class="card"><h3>排班规则</h3>' +
+    '<label class="ck"><input type="checkbox" id="multi-shift"' + (multi ? ' checked' : '') +
+    ' onchange="toggleMultiShift(this.checked)"> 允许每人每天上多个不重叠班次</label>' +
+    '<div class="muted" style="margin-top:6px">关闭（默认）＝每人每天最多一班，跨排班表也拦截。<br>' +
+    '开启后：同一人当天可在不同排班表兼班，但<b>时间区间重叠仍会被拦截</b>；同一排班表内仍为「一人一岗（移动）」。</div></div>';
+  h += '<div class="card"><h3>数据自检</h3>' +
+    '<div class="muted">检查孤立引用、同日冲突、时段重叠、重复底班、悬空顶班、失效权限与考勤类型等。</div>' +
+    '<div style="margin-top:8px"><button class="btn" onclick="runSelfcheck()">开始自检</button></div></div>' +
+    '<div id="selfcheck-result"></div>';
+  h += '<div class="toolbar"><h3>考勤类型设置</h3>' +
     '<span class="muted">修改名称与分数后保存即生效（无需重启）。「不在岗」类型当天不参与排班。</span>' +
     '<span class="spacer"></span>' +
     '<button class="btn" onclick="addKindRow()">+ 新增类型</button>' +
@@ -736,6 +750,59 @@ function renderSettings() {
   h += '</tbody></table>' +
     '<div class="muted" style="margin-top:10px">分数用于统计加权（正常×1）。「缺勤」通常为 0 分；「A事/B事」按实际折算。</div></div>';
   el.innerHTML = h;
+}
+async function toggleMultiShift(on) {
+  try {
+    await post('/api/settings', { multi_shift: on ? '1' : '0' });
+    if (!state.meta.settings) state.meta.settings = {};
+    state.meta.settings.multi_shift = on ? '1' : '0';
+    toast(on ? '已开启：每人每天可上多个不重叠班次' : '已恢复：每人每天最多一班');
+  } catch (e) {
+    toast(e.message, true);
+    renderSettings();
+  }
+}
+async function runSelfcheck() {
+  const box = $('#selfcheck-result');
+  if (!box) return;
+  box.innerHTML = '<div class="muted" style="margin-top:10px">检测中…</div>';
+  let d;
+  try {
+    d = await get('/api/selfcheck');
+  } catch (e) {
+    box.innerHTML = '<div class="card error-text" style="margin-top:10px">' + esc(e.message) + '</div>';
+    return;
+  }
+  let h = '<div class="card" style="margin-top:10px"><b>' +
+    (d.ok ? '未发现问题' : '发现 ' + d.issues + ' 个问题') + '</b>' +
+    '<span class="muted"> 排班 ' + d.counts.schedules + ' 行 · 考勤 ' + d.counts.attendance +
+    ' 行 · 人员 ' + d.counts.persons + ' 人 · 名单 ' + d.counts.rosters + ' 个</span></div>';
+  d.checks.forEach(function (c) {
+    const info = c.name.indexOf('已启用多班次') === 0;
+    let tag;
+    if (info) tag = '<span class="tag gray">' + c.count + ' 条</span>';
+    else if (c.count === 0) tag = '<span class="tag green">正常</span>';
+    else tag = '<span class="tag red">' + c.count + ' 项</span>';
+    h += '<div class="card"><div><b>' + esc(c.name) + '</b>：' + tag + '</div>';
+    if (!info && c.items && c.items.length) {
+      const cols = Object.keys(c.items[0]);
+      h += '<table class="list" style="margin-top:6px"><thead><tr>';
+      cols.forEach(function (k) { h += '<th>' + esc(k) + '</th>'; });
+      h += '</tr></thead><tbody>';
+      c.items.forEach(function (it) {
+        h += '<tr>';
+        cols.forEach(function (k) {
+          const v = it[k];
+          h += '<td>' + esc(Array.isArray(v) ? v.join('、') : (v == null ? '' : String(v))) + '</td>';
+        });
+        h += '</tr>';
+      });
+      h += '</tbody></table>';
+      if (c.count > c.items.length) h += '<div class="muted">仅显示前 ' + c.items.length + ' 条</div>';
+    }
+    h += '</div>';
+  });
+  box.innerHTML = h;
 }
 function addKindRow() {
   const body = $('#kinds-body');
@@ -1022,37 +1089,41 @@ async function loadStats() {
     const key = r.task_id;
     if (!(key in gindex)) {
       gindex[key] = groups.length;
-      groups.push({ id: key, name: r.task_id ? (r.task_name || '（无名排班表）') : '未参与排班', roster: r.roster_name || '', rows: [] });
+      groups.push({ key: String(key), id: key, name: r.task_id ? (r.task_name || '（无名排班表）') : '未参与排班', roster: r.roster_name || '', rows: [] });
     }
     groups[gindex[key]].rows.push(r);
   });
+  state.statsGroups = groups;
+  state.statsKinds = kinds;
+  state.statsLabelCols = labelCols;
+  state.statsRendered = {};
+  const bigStats = data.length > 300;
   let h = '<div class="card"><table class="list"><thead><tr><th>姓名</th><th>工号</th>';
   kinds.forEach(function (k) { h += '<th class="num">' + esc(k.label) + '</th>'; });
   h += '<th class="num">总班次</th><th class="num">总分数</th><th>明细</th></tr></thead><tbody>';
   let gCount = 0, gTotal = 0;
   const seen = {};
   groups.forEach(function (g) {
-    const key = String(g.id);
-    const closed = !!state.statsClosed[key];
-    let subCount = 0, subTotal = 0, rowsHTML = '';
+    if (!(g.key in state.statsClosed)) state.statsClosed[g.key] = bigStats;
+    const closed = !!state.statsClosed[g.key];
+    let subCount = 0, subTotal = 0;
     g.rows.forEach(function (r) {
       seen[r.person_id] = 1;
       subCount += r.count;
       subTotal += r.total;
-      let kcells = '';
-      kinds.forEach(function (k) { kcells += '<td class="num">' + (r[k.kind] || 0) + '</td>'; });
-      rowsHTML += '<tr class="gbody gbody-' + key + '"' + (closed ? ' style="display:none"' : '') + '><td><b>' + esc(r.name) + '</b></td><td>' + esc(r.code) + '</td>' + kcells +
-        '<td class="num">' + r.count + '</td>' +
-        '<td class="num"><b>' + r.total.toFixed(2) + '</b></td>' +
-        '<td><button class="btn small" onclick="openDetail(' + r.person_id + ',\'' + esc(String(r.name).replace(/'/g, '')) + '\')">查看</button></td></tr>';
     });
-    h += '<tr class="group-row" onclick="toggleStatsGroup(\'' + key + '\')"><td colspan="' + (labelCols + 3) + '">' +
-      '<span class="chev" id="chev-' + key + '">' + (closed ? '▸' : '▾') + '</span>排班表：' + esc(g.name) +
+    g.subCount = subCount;
+    g.subTotal = subTotal;
+    h += '<tr class="group-row" id="gh-' + g.key + '" onclick="toggleStatsGroup(\'' + g.key + '\')"><td colspan="' + (labelCols + 3) + '">' +
+      '<span class="chev" id="chev-' + g.key + '">' + (closed ? '▸' : '▾') + '</span>排班表：' + esc(g.name) +
       (g.id ? ' <span class="tag gray">名单：' + esc(g.roster) + '</span>' : '') +
       '（' + g.rows.length + '人）</td></tr>';
-    h += rowsHTML;
-    h += '<tr class="subtotal-row gbody gbody-' + key + '"' + (closed ? ' style="display:none"' : '') + '><td colspan="' + labelCols + '">' + esc(g.name) + ' 小计</td>' +
-      '<td class="num">' + subCount + '</td><td class="num">' + subTotal.toFixed(2) + '</td><td></td></tr>';
+    if (closed) {
+      state.statsRendered[g.key] = 0;
+    } else {
+      h += statsRowsHTML(g, kinds, labelCols);
+      state.statsRendered[g.key] = 1;
+    }
     gCount += subCount;
     gTotal += subTotal;
   });
@@ -1060,14 +1131,37 @@ async function loadStats() {
     '<td class="num">' + gCount + '</td><td class="num">' + gTotal.toFixed(2) + '</td><td></td></tr></tfoot></table></div>';
   box.innerHTML = h;
 }
+function statsRowsHTML(g, kinds, labelCols) {
+  let h = '';
+  g.rows.forEach(function (r) {
+    let kcells = '';
+    kinds.forEach(function (k) { kcells += '<td class="num">' + (r[k.kind] || 0) + '</td>'; });
+    h += '<tr class="gbody gbody-' + g.key + '"><td><b>' + esc(r.name) + '</b></td><td>' + esc(r.code) + '</td>' + kcells +
+      '<td class="num">' + r.count + '</td>' +
+      '<td class="num"><b>' + r.total.toFixed(2) + '</b></td>' +
+      '<td><button class="btn small" onclick="openDetail(' + r.person_id + ',\'' + esc(String(r.name).replace(/'/g, '')) + '\')">查看</button></td></tr>';
+  });
+  h += '<tr class="subtotal-row gbody gbody-' + g.key + '"><td colspan="' + labelCols + '">' + esc(g.name) + ' 小计</td>' +
+    '<td class="num">' + g.subCount + '</td><td class="num">' + g.subTotal.toFixed(2) + '</td><td></td></tr>';
+  return h;
+}
 function toggleStatsGroup(key) {
-  const body = document.querySelectorAll('.gbody-' + key);
+  const gh = document.getElementById('gh-' + key);
+  if (!gh) return;
+  const willClose = !state.statsClosed[key];
+  if (!willClose && !state.statsRendered[key]) {
+    const g = (state.statsGroups || []).filter(function (x) { return x.key === key; })[0];
+    if (g) {
+      gh.insertAdjacentHTML('afterend', statsRowsHTML(g, state.statsKinds || [], state.statsLabelCols));
+      state.statsRendered[key] = 1;
+    }
+  }
+  document.querySelectorAll('.gbody-' + key).forEach(function (el) {
+    el.style.display = willClose ? 'none' : '';
+  });
+  state.statsClosed[key] = willClose;
   const chev = document.getElementById('chev-' + key);
-  if (!body.length) return;
-  const hide = body[0].style.display !== 'none';
-  body.forEach(function (el) { el.style.display = hide ? 'none' : ''; });
-  state.statsClosed[key] = hide;
-  if (chev) chev.textContent = hide ? '▸' : '▾';
+  if (chev) chev.textContent = willClose ? '▸' : '▾';
 }
 async function openDetail(pid, name) {
   openModal('明细：' + name, '<div class="muted">加载中…</div>');

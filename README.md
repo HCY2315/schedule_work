@@ -126,11 +126,23 @@
 - 启动初始化幂等（`CREATE TABLE IF NOT EXISTS` + 仅空表写默认值），**重启/升级不覆盖已有配置**。
 - 详见 [六、数据安全与备份](#六数据安全与备份)。
 
+#### FR-13 排班规则设置（可配置）
+- 「设置」页提供「排班规则」开关：**允许多班次**（设置键 `multi_shift`）。
+- **关闭（默认）**：**每人每天最多一班**，跨任务/跨时段均拦截（原 `busy_any` 语义）。
+- **开启**：允许同一人当天在不同任务（排班表）承担**时间不重叠**的多段班次；**同一任务内仍保持「一人一岗」的移动语义**（在排班网格内调整是“移动”而非新增）。
+- **时间重叠始终拦截**（与开关无关）：同一人时间上冲突的时段不可同时排。
+- 开关值持久化于 `settings` 表，通过 `/api/settings` 读写；排班生成与手工指派、顶班实时读取最新值。
+
+#### FR-14 数据自检
+- 「设置」页提供「数据自检」按钮，调用 `GET /api/selfcheck`。
+- 检查项：孤立引用（记录指向已删除对象）、跨任务同日冲突（**仅当多班次关闭时**计入问题）、时间区间重叠、同一岗位同日多条底班、顶班指向不存在的底班、非法考勤类型、权限引用失效。
+- 返回 `{ok, issues, settings, checks, counts}`；开启多班次后，正常的跨任务同日排班降级为信息项，不再计入 `issues`。
+
 ### 1.4 业务规则与约束（不变量）
 
 排班/顶班必须满足：
 
-1. **每人每天最多一班**：跨任务也拦截（`busy_any`）。
+1. **每人每天最多一班（默认）**：跨任务也拦截。当「允许多班次」（`multi_shift`）开启时，放宽为「**跨任务间时间不重叠即可**」；无论开关如何，**时间重叠始终拦截**（见 [FR-13](#fr-13-排班规则设置可配置)）。
 2. **岗位权限匹配**：人员权限须包含岗位要求的权限（岗位权限为空=不限）。
 3. **不在岗不排班**：考勤类型 `unavailable=1` 的人员当天不参与排班。
 4. **同任务不连续两天同一班次**：昨天上过的班次，今天不排（自动排班为硬约束；顶班时放宽为软偏好）。
@@ -170,10 +182,15 @@
 | `schedules` | `id, task_id, date, slot_id, position_id, person_id, cover_of`，`UNIQUE(task_id,date,position_id,person_id)` | 排班记录；`cover_of` 指向被顶班者 |
 | `attendance` | `id, person_id, date, kind, reason`，`UNIQUE(person_id,date)` | 考勤记录 |
 | `att_kinds` | `kind(PK), label, weight, unavailable, sort` | 考勤类型配置（运行期唯一来源） |
+| `settings` | `key(PK), value` | 全局设置键值对（如 `multi_shift`） |
+
+**索引**（加速按日期/人员/岗位查询）：`schedules` 上 `date`、`(person_id,date)`、`(task_id,date)`、`slot_id`、`position_id`、`(date,position_id)`；`attendance` 上 `date`、`(person_id,date)`；`persons(roster_id)`、`slots(task_id)`、`positions(slot_id)`。
 
 **说明**
 - `perm_ids` 以 JSON 字符串存储（如 `[1,2,3]`）。
 - `att_kinds` 是「考勤类型」的唯一运行期来源，`normal` 恒存在。
+- `settings` 用于运行期可调规则（目前：`multi_shift`，默认 `0`）；启动时仅补默认键，不覆盖已有值。
+- 数据库以 **WAL 模式**运行（`PRAGMA journal_mode=WAL`），提升多写并发；连接设 `busy_timeout=5000`、`synchronous=NORMAL`。
 - 无外键约束，删除时由应用层手工级联清理。
 
 ---
@@ -184,8 +201,10 @@ REST，JSON 收发。基址 `http://127.0.0.1:8686`。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/meta` | 元数据：名单、权限、类别、考勤类型等 |
+| GET | `/api/meta` | 元数据：名单、权限、类别、考勤类型、**设置**等 |
 | GET/POST/PUT | `/api/att_kinds` | 读取/保存考勤类型配置 |
+| GET/POST/PUT | `/api/settings` | 读取/保存全局设置（如 `multi_shift`；未知键报错） |
+| GET | `/api/selfcheck` | 数据一致性自检（返回 `ok/issues/checks/counts`） |
 | GET/POST | `/api/permissions` | 列出 / 新增权限 |
 | PUT/DELETE | `/api/permissions/{id}` | 重命名 / 删除权限（级联清理） |
 | GET | `/api/categories` | 列出类别 |
@@ -249,13 +268,14 @@ python3 dist/排班系统.pyz      # 运行（数据文件在 dist/data.db）
 ## 五、测试
 
 ```bash
-python3 selftest.py            # 后端自测（业务规则/配置/分组/顶班）
+python3 selftest.py            # 后端自测（业务规则/配置/分组/顶班/多班次/自检）
 ```
 
-- `selftest.py`：覆盖公平性、配置化、按排班表分组统计、顶班覆盖等场景。
+- `selftest.py`：**69 项断言**，覆盖公平性、配置化、按排班表分组统计、顶班覆盖、多班次开关、数据自检等场景。
 - 前端 E2E（可选，需 playwright-core + chromium）：
   ```bash
-  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/e2e.js
+  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/e2e.js       # 全流程回归（34 项）
+  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat.js   # 设置页开关 + 自检 + 统计折叠（19 项）
   ```
   E2E 断言**标签无关**（从 `/api/meta.att_kinds` 动态取名称/权重），可在 `A事/B事` 与 `事假/病假` 两种配置下通过。
 
@@ -281,6 +301,7 @@ python3 seed_demo.py --force  --db data.db                  # 清空业务数据
 | 权限列表 | `permissions` | GET/POST/PUT/DELETE `/api/permissions` |
 | 人员类别与默认权限 | `categories` | GET `/api/categories`、PUT `/api/categories/{id}` |
 | 考勤类型 | `att_kinds` | GET/POST/PUT `/api/att_kinds` |
+| 排班规则（允许多班次） | `settings` | GET/POST/PUT `/api/settings` |
 
 **为什么不丢**
 1. 每次请求实时查表，不存在「只改前端内存」。
@@ -353,19 +374,19 @@ work_day/
 - `generate_month` 按天贪心计算（天数 × 岗位 × 候选人数），100 人一个月约万级比较，毫秒级。
 - `year_scores`/`get_stats` 在内存中聚合当年排班与考勤数据，百人级别的数据量很小。
 
-**3. 最大瓶颈：全部年份统计 + 前端整表渲染（最先触发）**
-- `get_stats` 为每个 **（排班表 × 人员）** 组合生成一行，并在 `scores` 数组中记录每次排班的得分。
-- 按年统计：200 人 × 4 个排班表 ≈ 800 行，表现正常。
-- **选择「全部年份」** 时，每行的 `scores` 数组会累积到上千个元素，导致 JSON 响应膨胀到数 MB，且前端**一次性整表渲染（无分页/无虚拟滚动）**，浏览器会出现明显卡顿。这是最先遇到的瓶颈。
+**3. 曾经的瓶颈：全部年份统计 + 前端整表渲染（已优化）**
+- `get_stats` 为每个 **（排班表 × 人员）** 组合生成一行（各考勤类型计数 + `总班次` + `总分数`）。
+- **已优化**：移除了每行的 `scores` 明细数组（前端从不使用），响应体积大幅下降（16 人测试库 `全部年份` JSON ≈ 3KB）；前端统计改为**分组懒渲染**——行数 > 300 时默认折叠，分组明细**首次展开时才插入 DOM**（实测 320 行时首屏 DOM 内明细行数 = 0）。
+- 剩余影响：选择「全部年份」且分组被**全部展开**后，仍是整组渲染，暂无虚拟滚动。
 
 **4. 并发能力**
 - 单进程 `ThreadingHTTPServer`，每次请求新建 SQLite 连接（无连接池），静态资源 `Cache-Control: no-store`。
-- SQLite **未启用 WAL**，为单写者模式；多人同时保存会串行化，极端情况下可能出现 `database is locked`。
+- SQLite 已启用 **WAL**（`journal_mode=WAL`）并设 `busy_timeout=5000`、`synchronous=NORMAL`，多写并发与抗锁能力显著改善。
 - 系统无登录/权限分级与并发编辑冲突检测（采用后写覆盖）。
 - **推荐**：同时在线编辑 **2–5 人** 没问题；适合作为「少数人共用的本地后台工具」，不适合作为高并发 Web 服务。
 
 **5. 前端渲染规模**
-- 单页应用，名单、人员、排班网格、统计均为**整表一次性渲染，无虚拟滚动**。当行数达到数百时 DOM 变重，全部年份统计会放大这个问题。
+- 单页应用，名单、人员、排班网格、统计均为整表渲染，**无虚拟滚动**；其中**统计已支持分组懒渲染**（大表默认折叠、按需插入），其余列表在数百行时 DOM 仍会变重。
 
 ### 8.3 分档建议
 
@@ -378,17 +399,29 @@ work_day/
 
 > 注：总人数指该部署下所有名单的总人数（多个排班表/任务会累加统计行数）。
 
-### 8.4 优化建议（按性价比排序）
+### 8.4 优化落地情况
 
-| 顺序 | 优化点 | 效果 | 改动复杂度 |
+**本版已实施**：
+
+| 优化点 | 说明 |
+|---|---|
+| 统计移除 `scores` 明细数组 | 响应体积大幅下降；前端本就不使用该字段（**API 变更**） |
+| 统计分组懒渲染 | 行数 > 300 默认折叠，展开时才把该组明细插入 DOM |
+| SQLite 启用 WAL | `journal_mode=WAL` + `busy_timeout=5000` + `synchronous=NORMAL` |
+| 关键字段加索引 | `schedules`/`attendance`/`persons`/`slots`/`positions` 共 11 个索引 |
+| 消除接口 N+1 查询 | `/api/tasks` 批量聚合；`/api/attendance` 预载权限字典 + JOIN 人员/名单 |
+
+**后续可选（按性价比）**：
+
+| 顺序 | 优化点 | 效果 | 复杂度 |
 |---|---|---|---|
-| 1 | **统计支持分页 / 默认按年** | ★★★★★（尤其解决「全部年份」卡顿） | 低 |
-| 2 | **SQLite 启用 WAL**（`PRAGMA journal_mode=WAL`） | ★★★★☆（提升多写并发） | 极低 |
-| 3 | **为 `schedules(date)`、`attendance(date)` 添加索引** | ★★★★☆（加速按年/按日期查询） | 极低 |
-| 4 | **切换到 WSGI/ASGI + 连接池** | ★★★☆☆（提升并发稳定性） | 中 |
-| 5 | **统计表虚拟滚动 / 懒加载** | ★★★☆☆（改善大表渲染体验） | 中 |
+| 1 | 统计分页 / 虚拟滚动 | ★★★★☆（超大数据集） | 中 |
+| 2 | 切换到 WSGI/ASGI + 连接池 | ★★★☆☆（并发稳定性） | 中 |
+| 3 | 连接复用 / 结果缓存 | ★★☆☆☆ | 中 |
 
-需要的话，可以先做 1–3（三项改动最小、收益最大）。
+---
+
+
 排班算法实现分析（核心：按日贪心 + 多维排序 + “先难后易”岗位处理）
 
 1. 概览

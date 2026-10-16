@@ -209,8 +209,9 @@ def scenario_config():
     stats = {r["person_id"]: r for r in server.get_stats({"year": ["2026"]})[1]}
     row = stats[pid]
     check("统计按 kind 分桶", row["a"] >= 1 and row["normal"] >= 0, "a=%d normal=%d" % (row["a"], row["normal"]))
-    check("scores 列表长度=班次数", len(row["scores"]) == row["count"], "len=%d count=%d" % (len(row["scores"]), row["count"]))
-    check("scores 之和=总分数", abs(sum(row["scores"]) - row["total"]) < 1e-9, "sum=%s total=%s" % (sum(row["scores"]), row["total"]))
+    expect_total = sum(row[k] * db.att_kinds_map()[k]["weight"] for k in db.att_kinds_map())
+    check("总分数=各 kind 计数×权重之和", abs(row["total"] - expect_total) < 1e-9,
+          "total=%s 期望=%s" % (row["total"], expect_total))
     check("总班次=各 kind 计数之和", row["count"] == sum(row[k] for k in db.att_kinds_map()),
           "count=%d 期望=%d" % (row["count"], sum(row[k] for k in db.att_kinds_map())))
 
@@ -232,8 +233,9 @@ def scenario_config():
     try:
         st, _ = server.put_att_kinds({"kinds": changed})
         row2 = {r["person_id"]: r for r in server.get_stats({"year": ["2026"]})[1]}[pid]
+        expect2 = sum(row2[k] * db.att_kinds_map()[k]["weight"] for k in db.att_kinds_map())
         check("改分数即改计分（接口）",
-              st == 200 and any(abs(s - 0.9) < 1e-9 for s in row2["scores"]), "scores=%s" % row2["scores"][:8])
+              st == 200 and abs(row2["total"] - expect2) < 1e-9, "total=%s 期望=%s" % (row2["total"], expect2))
     finally:
         server.put_att_kinds({"kinds": orig})
 

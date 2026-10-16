@@ -51,6 +51,7 @@ DEFAULT_ATT_KINDS = {
 
 
 _KINDS_CACHE = None
+_SETTINGS_CACHE = None
 
 
 def _read_kinds(conn):
@@ -102,18 +103,66 @@ def norm_kind(kind):
     return kind if kind in att_kinds_map() else "normal"
 
 
+DEFAULT_SETTINGS = {
+    "multi_shift": "0",
+}
+
+
+def settings_map():
+    global _SETTINGS_CACHE
+    if _SETTINGS_CACHE is None:
+        conn = get_conn()
+        try:
+            loaded = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")}
+        finally:
+            conn.close()
+        _SETTINGS_CACHE = dict(DEFAULT_SETTINGS, **loaded)
+    return _SETTINGS_CACHE
+
+
+def get_setting(key, default=None):
+    if default is None:
+        default = DEFAULT_SETTINGS.get(key, "")
+    return settings_map().get(key, default)
+
+
+def set_setting(key, value):
+    global _SETTINGS_CACHE
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, str(value)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _SETTINGS_CACHE = None
+
+
+def multi_shift_enabled():
+    return get_setting("multi_shift", "0").lower() in ("1", "true", "yes", "on")
+
+
 def hhmm(minutes):
     return "%02d:%02d" % (minutes // 60, minutes % 60)
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.row_factory = sqlite3.Row
+    # per-connection pragmas（journal_mode 是持久化的，放在 init_db 里执行一次）
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
     return conn
 
 
 def init_db():
     conn = get_conn()
+    # WAL：读写可并发，写锁粒度从库级降为事务级，多人同时保存不易 "database is locked"
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS permissions(
@@ -185,6 +234,25 @@ def init_db():
             unavailable INTEGER NOT NULL DEFAULT 0,
             sort INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS settings(
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        """
+    )
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sched_date       ON schedules(date);
+        CREATE INDEX IF NOT EXISTS idx_sched_person_dt  ON schedules(person_id, date);
+        CREATE INDEX IF NOT EXISTS idx_sched_task_dt    ON schedules(task_id, date);
+        CREATE INDEX IF NOT EXISTS idx_sched_slot       ON schedules(slot_id);
+        CREATE INDEX IF NOT EXISTS idx_sched_position   ON schedules(position_id);
+        CREATE INDEX IF NOT EXISTS idx_sched_date_pos   ON schedules(date, position_id);
+        CREATE INDEX IF NOT EXISTS idx_att_date         ON attendance(date);
+        CREATE INDEX IF NOT EXISTS idx_att_person_dt    ON attendance(person_id, date);
+        CREATE INDEX IF NOT EXISTS idx_persons_roster   ON persons(roster_id);
+        CREATE INDEX IF NOT EXISTS idx_slots_task       ON slots(task_id);
+        CREATE INDEX IF NOT EXISTS idx_positions_slot   ON positions(slot_id);
         """
     )
     _seed(conn)

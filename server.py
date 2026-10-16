@@ -318,18 +318,26 @@ def delete_persons(pid):
 # ---------------------------------------------------------------- 任务
 
 
-def _task_summary(conn, t):
-    d = dict(t)
-    d["roster_name"] = (conn.execute("SELECT name FROM rosters WHERE id=?", (d["roster_id"],)).fetchone() or {"name": "?"})["name"]
-    d["slot_count"] = conn.execute("SELECT COUNT(*) c FROM slots WHERE task_id=?", (d["id"],)).fetchone()["c"]
-    d["person_count"] = conn.execute("SELECT COUNT(*) c FROM persons WHERE roster_id=?", (d["roster_id"],)).fetchone()["c"]
-    return d
-
-
 def get_tasks():
     conn = get_conn()
     try:
-        return _ok([_task_summary(conn, r) for r in conn.execute("SELECT * FROM tasks ORDER BY id")])
+        roster_names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM rosters")}
+        slot_counts = {
+            r["task_id"]: r["c"]
+            for r in conn.execute("SELECT task_id, COUNT(*) c FROM slots GROUP BY task_id")
+        }
+        person_counts = {
+            r["roster_id"]: r["c"]
+            for r in conn.execute("SELECT roster_id, COUNT(*) c FROM persons GROUP BY roster_id")
+        }
+        out = []
+        for t in conn.execute("SELECT * FROM tasks ORDER BY id"):
+            d = dict(t)
+            d["roster_name"] = roster_names.get(d["roster_id"], "?")
+            d["slot_count"] = slot_counts.get(d["id"], 0)
+            d["person_count"] = person_counts.get(d["roster_id"], 0)
+            out.append(d)
+        return _ok(out)
     finally:
         conn.close()
 
@@ -610,12 +618,14 @@ def assign(tid, body):
             return _err("该人员当天已登记不在岗（%s）" % absent_labels())
         if not sc._perm_ok(person, dict(pos)):
             return _err("该人员没有此岗位所需权限「%s」" % _perm_name(conn, pos["perm_id"]))
-        other = conn.execute(
-            "SELECT 1 FROM schedules WHERE person_id=? AND date=? AND task_id<>? LIMIT 1",
-            (person_id, date, tid),
-        ).fetchone()
-        if other:
-            return _err("该人员当天已有排班")
+        multi = db.multi_shift_enabled()
+        other = [
+            b
+            for b in sc.busy_intervals(conn, person_id, date)
+            if b[2] != tid
+        ]
+        if sc.has_conflict(other, slot["start"], slot["end"], multi=multi):
+            return _err("该人员该时段已有排班" if multi else "该人员当天已有排班")
         yd = (dt_date(date) - dt_delta()).isoformat()
         yrow = conn.execute(
             "SELECT slot_id FROM schedules WHERE task_id=? AND date=? AND person_id=?",
@@ -683,6 +693,7 @@ def get_attendance(qs):
         ).fetchall()
         grouped = {}
         order = []
+        perms = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM permissions")}
         for r in rows:
             key = (r["task_id"], r["position_id"])
             if key not in grouped:
@@ -696,7 +707,7 @@ def get_attendance(qs):
                     "end": r["end"],
                     "position_id": r["position_id"],
                     "position_name": r["position_name"],
-                    "perm_name": _perm_name(conn, r["perm_id"]),
+                    "perm_name": perms.get(r["perm_id"], ""),
                     "base": None,
                     "covers": [],
                 }
@@ -713,11 +724,13 @@ def get_attendance(qs):
                 grouped[key]["covers"].append(item)
 
         recs = conn.execute(
-            "SELECT a.person_id, a.kind, a.reason, p.name FROM attendance a "
-            "JOIN persons p ON p.id=a.person_id WHERE a.date=?",
+            "SELECT a.person_id, a.kind, a.reason, p.name, p.roster_id, "
+            "ro.name AS roster_name FROM attendance a "
+            "JOIN persons p ON p.id=a.person_id "
+            "LEFT JOIN rosters ro ON ro.id=p.roster_id WHERE a.date=?",
             (date,),
         ).fetchall()
-        rec_map = {r["person_id"]: {"kind": r["kind"], "reason": r["reason"]} for r in recs}
+        rec_map = {r["person_id"]: dict(r) for r in recs}
         for k in order:
             g = grouped[k]
             for it in ([g["base"]] if g["base"] else []) + g["covers"]:
@@ -738,17 +751,12 @@ def get_attendance(qs):
         for pid, rec in rec_map.items():
             if pid in scheduled_pids:
                 continue
-            prow = conn.execute(
-                "SELECT p.name, p.roster_id, r.name AS roster_name FROM persons p "
-                "LEFT JOIN rosters r ON r.id=p.roster_id WHERE p.id=?",
-                (pid,),
-            ).fetchone()
             extra.append(
                 {
                     "person_id": pid,
-                    "name": prow["name"] if prow else str(pid),
-                    "roster_id": prow["roster_id"] if prow else None,
-                    "roster_name": (prow["roster_name"] if prow else "") or "",
+                    "name": rec["name"],
+                    "roster_id": rec["roster_id"],
+                    "roster_name": rec["roster_name"] or "",
                     "kind": rec["kind"],
                     "reason": rec["reason"],
                 }
@@ -798,6 +806,152 @@ def put_att_kinds(body):
     finally:
         conn.close()
     return _ok(att_kinds())
+
+
+def get_settings():
+    return _ok(dict(db.settings_map()))
+
+
+def put_settings(body):
+    if not isinstance(body, dict):
+        return _err("参数错误")
+    known = set(db.DEFAULT_SETTINGS)
+    unknown = [k for k in body if k not in known]
+    if unknown:
+        return _err("未知设置项：%s" % "、".join(sorted(unknown)))
+    for k, v in body.items():
+        if k == "multi_shift" and str(v).lower() not in ("0", "1", "true", "false", "on", "off", "yes", "no"):
+            return _err("multi_shift 只能取 0/1")
+        db.set_setting(k, v)
+    return _ok(dict(db.settings_map()))
+
+
+def selfcheck():
+    conn = get_conn()
+    try:
+        checks = []
+
+        def add(name, items, sample=10):
+            checks.append({"name": name, "count": len(items), "items": items[:sample]})
+
+        slots = {r["id"]: dict(r) for r in conn.execute('SELECT * FROM slots')}
+        tasks = {r["id"] for r in conn.execute("SELECT id FROM tasks")}
+        persons = {r["id"] for r in conn.execute("SELECT id FROM persons")}
+        positions = {r["id"]: dict(r) for r in conn.execute("SELECT id, slot_id, perm_id FROM positions")}
+        perms = {r["id"] for r in conn.execute("SELECT id FROM permissions")}
+        cats = [dict(r) for r in conn.execute("SELECT * FROM categories")]
+        multi = db.multi_shift_enabled()
+
+        orphan = []
+        for sc_row in conn.execute("SELECT * FROM schedules"):
+            r = dict(sc_row)
+            if r["task_id"] not in tasks:
+                orphan.append({"表": "schedules", "行": r["id"], "原因": "task_id=%s 不存在" % r["task_id"]})
+            if r["slot_id"] not in slots:
+                orphan.append({"表": "schedules", "行": r["id"], "原因": "slot_id=%s 不存在" % r["slot_id"]})
+            if r["position_id"] not in positions:
+                orphan.append({"表": "schedules", "行": r["id"], "原因": "position_id=%s 不存在" % r["position_id"]})
+            elif r["slot_id"] in slots and positions[r["position_id"]]["slot_id"] != r["slot_id"]:
+                orphan.append({"表": "schedules", "行": r["id"],
+                               "原因": "position %s 不属于 slot %s" % (r["position_id"], r["slot_id"])})
+            if r["person_id"] not in persons:
+                orphan.append({"表": "schedules", "行": r["id"], "原因": "person_id=%s 不存在" % r["person_id"]})
+        for p in conn.execute("SELECT id, roster_id FROM persons"):
+            if conn.execute("SELECT 1 FROM rosters WHERE id=?", (p["roster_id"],)).fetchone() is None:
+                orphan.append({"表": "persons", "行": p["id"], "原因": "roster_id=%s 不存在" % p["roster_id"]})
+        for s in conn.execute("SELECT id, task_id FROM slots"):
+            if s["task_id"] not in tasks:
+                orphan.append({"表": "slots", "行": s["id"], "原因": "task_id=%s 不存在" % s["task_id"]})
+        add("孤立引用（记录指向已删除对象）", orphan)
+
+        by_person_day = {}
+        for r in conn.execute(
+            "SELECT sc.id, sc.person_id, sc.date, sc.task_id, sc.position_id, sc.cover_of, "
+            's.start, s."end" FROM schedules sc JOIN slots s ON s.id=sc.slot_id'
+        ):
+            by_person_day.setdefault((r["person_id"], r["date"]), []).append(dict(r))
+
+        cross_task = []
+        overlaps = []
+        multi_ok = []
+        for (pid, date), rows in by_person_day.items():
+            tids = {r["task_id"] for r in rows}
+            if len(tids) > 1:
+                if not multi:
+                    cross_task.append({"person_id": pid, "date": date,
+                                       "说明": "同一天 %d 个任务，当前规则「每人每天最多一班」" % len(tids),
+                                       "任务": sorted(tids)})
+                else:
+                    multi_ok.append({"person_id": pid, "date": date, "任务": sorted(tids)})
+            for i in range(len(rows)):
+                for j in range(i + 1, len(rows)):
+                    a, b = rows[i], rows[j]
+                    if sc._overlaps((a["start"], a["end"]), (b["start"], b["end"])):
+                        overlaps.append({"person_id": pid, "date": date,
+                                         "时段1": "%s %s-%s" % (a["task_id"], a["start"], a["end"]),
+                                         "时段2": "%s %s-%s" % (b["task_id"], b["start"], b["end"])})
+        add("跨任务同日冲突（违反「每人每天最多一班」）", cross_task)
+        add("时间区间重叠（两种模式下都应为 0）", overlaps)
+        add("已启用多班次：跨任务同日（非重叠，属正常）", multi_ok)
+
+        dup_base = []
+        for r in conn.execute(
+            "SELECT task_id, date, position_id, COUNT(*) c FROM schedules "
+            "WHERE cover_of IS NULL GROUP BY task_id, date, position_id HAVING c>1"
+        ):
+            dup_base.append({"task_id": r["task_id"], "date": r["date"],
+                             "position_id": r["position_id"], "条数": r["c"]})
+        add("同一岗位同一天存在多条底班", dup_base)
+
+        dangling = []
+        for r in conn.execute("SELECT id, cover_of FROM schedules WHERE cover_of IS NOT NULL"):
+            if conn.execute("SELECT 1 FROM schedules WHERE id=?", (r["cover_of"],)).fetchone() is None:
+                dangling.append({"schedules.id": r["id"], "原因": "cover_of=%s 指向不存在的行" % r["cover_of"]})
+        add("顶班记录指向不存在的底班", dangling)
+
+        bad_kind = []
+        kinds = set(db.att_kinds_map())
+        for r in conn.execute("SELECT id, person_id, date, kind FROM attendance"):
+            if r["kind"] not in kinds:
+                bad_kind.append({"attendance.id": r["id"], "person_id": r["person_id"],
+                                 "date": r["date"], "kind": r["kind"],
+                                 "原因": "不在当前考勤类型配置中"})
+        add("考勤类型代码未在「设置」中定义", bad_kind)
+
+        bad_perm = []
+        for r in conn.execute("SELECT id, perm_ids, preferred_perm_id FROM persons"):
+            for pid in _loads(r["perm_ids"], []):
+                if pid not in perms:
+                    bad_perm.append({"表": "persons", "行": r["id"], "原因": "perm_ids 含已删权限 %s" % pid})
+            if r["preferred_perm_id"] is not None and r["preferred_perm_id"] not in perms:
+                bad_perm.append({"表": "persons", "行": r["id"],
+                                 "原因": "preferred_perm_id=%s 已删除" % r["preferred_perm_id"]})
+        for c in cats:
+            for pid in _loads(c["perm_ids"], []):
+                if pid not in perms:
+                    bad_perm.append({"表": "categories", "行": c["id"], "原因": "perm_ids 含已删权限 %s" % pid})
+            if c["preferred_perm_id"] is not None and c["preferred_perm_id"] not in perms:
+                bad_perm.append({"表": "categories", "行": c["id"],
+                                 "原因": "preferred_perm_id=%s 已删除" % c["preferred_perm_id"]})
+        for pid, p in positions.items():
+            if p["perm_id"] is not None and p["perm_id"] not in perms:
+                bad_perm.append({"表": "positions", "行": pid, "原因": "perm_id=%s 已删除" % p["perm_id"]})
+        add("权限引用失效", bad_perm)
+
+        counts = {}
+        for t in ("schedules", "attendance", "persons", "tasks", "slots", "positions", "rosters", "permissions"):
+            counts[t] = conn.execute("SELECT COUNT(*) c FROM %s" % t).fetchone()["c"]
+
+        total = sum(c["count"] for c in checks if not c["name"].startswith("已启用多班次"))
+        return _ok({
+            "ok": total == 0,
+            "issues": total,
+            "settings": dict(db.settings_map()),
+            "checks": checks,
+            "counts": counts,
+        })
+    finally:
+        conn.close()
 
 
 def post_attendance(body):
@@ -962,7 +1116,7 @@ def get_stats(qs):
         }
 
         def blank():
-            return {"kinds": {kk: 0 for kk in kinds}, "total": 0.0, "scores": []}
+            return {"kinds": {kk: 0 for kk in kinds}, "total": 0.0}
 
         # 一个「排班表」= 一个排班任务：班次/分数按 (人员, 排班表) 分开累计，不跨排班表合并。
         for r in conn.execute(
@@ -974,7 +1128,6 @@ def get_stats(qs):
             d = agg.setdefault((r["task_id"], r["person_id"]), blank())
             d["kinds"][k] += 1
             d["total"] += sc.weight_of(k)
-            d["scores"].append(round(sc.weight_of(k), 2))
 
         def make_row(p, task_id, task_name, roster_name):
             d = agg.get((task_id, p["id"])) or blank()
@@ -988,7 +1141,6 @@ def get_stats(qs):
                 "task_name": task_name or "",
                 "count": sum(d["kinds"].values()),
                 "total": round(d["total"], 2),
-                "scores": d["scores"],
             }
             for kk in kinds:
                 row[kk] = d["kinds"][kk]
@@ -1112,12 +1264,20 @@ def dispatch(method, path, qs, body):
             status, data = get_categories()
             if status != 200:
                 return status, data
-            return _ok({"permissions": perms, "categories": data, "att_kinds": att_kinds()})
+            return _ok({"permissions": perms, "categories": data, "att_kinds": att_kinds(),
+                        "settings": dict(db.settings_map())})
         if path == "/api/att_kinds":
             if method == "GET":
                 return get_att_kinds()
             if method in ("POST", "PUT"):
                 return put_att_kinds(body)
+        if path == "/api/settings":
+            if method == "GET":
+                return get_settings()
+            if method in ("POST", "PUT"):
+                return put_settings(body)
+        if path == "/api/selfcheck" and method == "GET":
+            return selfcheck()
         if path == "/api/permissions":
             if method == "GET":
                 return get_permissions()

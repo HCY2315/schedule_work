@@ -8,6 +8,7 @@ from collections import Counter
 from db import (
     get_conn,
     att_kinds_map,
+    multi_shift_enabled,
 )
 
 
@@ -133,9 +134,41 @@ def free_at(conn, person_id, date, start, end, exclude_task_id=None, exclude_pos
     return True
 
 
-def busy_any(conn, person_id, date, exclude_task_id=None, exclude_position_id=None):
-    """当天是否已有任何排班（每人每天只上一班）。"""
-    return len(busy_intervals(conn, person_id, date, exclude_task_id, exclude_position_id)) > 0
+def load_day_busy(conn, date):
+    """一次取回当天全库排班：{person_id: [(start, end, task_id, position_id), ...]}。"""
+    out = {}
+    for r in conn.execute(
+        "SELECT sc.person_id, sc.task_id, sc.position_id, s.start, s.\"end\" "
+        "FROM schedules sc JOIN slots s ON s.id = sc.slot_id "
+        "WHERE sc.date=? ORDER BY sc.id",
+        (date,),
+    ):
+        out.setdefault(r["person_id"], []).append(
+            (r["start"], r["end"], r["task_id"], r["position_id"])
+        )
+    return out
+
+
+def has_conflict(intervals, start, end, exclude_task_id=None, exclude_position_id=None, multi=None):
+    """是否与已有排班冲突。
+
+    multi=False（默认，每人每天最多一班）：当天存在任一其他排班即冲突。
+    multi=True（允许一天多班）：仅当时间区间重叠才算冲突。
+    """
+    if multi is None:
+        multi = multi_shift_enabled()
+    for b in intervals:
+        if (
+            exclude_task_id is not None
+            and b[2] == exclude_task_id
+            and b[3] == exclude_position_id
+        ):
+            continue
+        if not multi:
+            return True
+        if _overlaps((start, end), (b[0], b[1])):
+            return True
+    return False
 
 
 def attendance_kind(conn, person_id, date):
@@ -275,10 +308,8 @@ def _generate_day(conn, task, roster, date, slot_ids, gen_count):
     prev = _prev_assignments(conn, task["id"], date)
     yslots = _yesterday_slots(conn, task["id"], date)
     scores = year_scores(conn)
-    busy_today = {
-        r["person_id"]
-        for r in conn.execute("SELECT DISTINCT person_id FROM schedules WHERE date=?", (date,))
-    }
+    multi = multi_shift_enabled()
+    day_busy = load_day_busy(conn, date)
     available = [p for p in roster if not _unavailable(conn, p["id"], date)]
     assigned = set()
 
@@ -290,9 +321,14 @@ def _generate_day(conn, task, roster, date, slot_ids, gen_count):
 
     def eligible(p, sid, pos):
         pid = p["id"]
-        if pid in assigned or pid in busy_today:
-            return False
         if not _perm_ok(p, pos):
+            return False
+        if multi:
+            return not has_conflict(
+                day_busy.get(pid, []), slot_by_id[sid]["start"], slot_by_id[sid]["end"],
+                task["id"], pos["id"], multi=True,
+            )
+        if pid in assigned or pid in day_busy:
             return False
         return yslots.get(pid) != sid
 
@@ -325,6 +361,9 @@ def _generate_day(conn, task, roster, date, slot_ids, gen_count):
         assigned.add(p["id"])
         gen_count[p["id"]] += 1
         _insert(conn, task["id"], date, sid, pos["id"], p["id"], None)
+        day_busy.setdefault(p["id"], []).append(
+            (slot_by_id[sid]["start"], slot_by_id[sid]["end"], task["id"], pos["id"])
+        )
     conn.commit()
     return warnings
 
@@ -365,6 +404,8 @@ def suggest_covers(conn, task_id, date, position_id, limit=None):
     ).fetchone()["roster_id"])
     yslots = _yesterday_slots(conn, task_id, date)
     scores = year_scores(conn)
+    multi = multi_shift_enabled()
+    day_busy = load_day_busy(conn, date)
     base_row = conn.execute(
         "SELECT person_id FROM schedules WHERE task_id=? AND date=? AND position_id=? AND cover_of IS NULL",
         (task_id, date, position_id),
@@ -379,7 +420,7 @@ def suggest_covers(conn, task_id, date, position_id, limit=None):
             continue
         if not _perm_ok(p, pos):
             continue
-        busy = busy_any(conn, p["id"], date)
+        busy = has_conflict(day_busy.get(p["id"], []), slot["start"], slot["end"], multi=multi)
         risky = yslots.get(p["id"]) == slot["id"]
         out.append(
             {
@@ -433,10 +474,15 @@ def apply_cover(conn, task_id, date, position_id, person_id):
     if not _perm_ok(p, pos):
         raise ValueError("该人员没有此岗位所需权限")
     slot = dict(conn.execute("SELECT * FROM slots WHERE id=?", (row["slot_id"],)).fetchone())
-    # 允许选择当天已排人员：同任务内自动移入本岗位，跨任务仍按「每人每天一班」拦截；昨天同班次不再硬拦截。
+    # 允许选择当天已排人员：同任务内自动移入本岗位，跨任务按冲突规则拦截；昨天同班次不再硬拦截。
+    multi = multi_shift_enabled()
     for b in busy_intervals(conn, person_id, date):
-        if b[2] != task_id:
+        if b[2] == task_id:
+            continue
+        if not multi:
             raise ValueError("该人员当天已在其他任务排班")
+        if _overlaps((slot["start"], slot["end"]), (b[0], b[1])):
+            raise ValueError("该人员此时段已在其他任务排班")
     conn.execute(
         "DELETE FROM schedules WHERE person_id=? AND date=? AND task_id=?",
         (person_id, date, task_id),

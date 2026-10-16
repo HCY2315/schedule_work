@@ -8,5 +8,6 @@ dist/
 build/
 *.spec
 .build_pyz/
+.pybuild_deps/
 ._*
 .idea/

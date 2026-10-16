@@ -249,6 +249,11 @@ python3 server.py
 - 可用环境变量：
   - `WORKDAY_PORT=8686` 指定端口
   - `WORKDAY_NO_BROWSER=1` 不自动打开浏览器
+- **一键重启**（改了代码后必须重启进程才生效）：
+  ```bash
+  ./restart.sh        # 自动杀旧进程 + 重启 + 健康检查 + 提示强刷
+  ```
+  前端 JS/CSS 改动请按 `Ctrl+Shift+R` 强制刷新；后端 Python 改动必须重启进程。
 
 ### 方式二：单文件 pyz（免安装，跨平台）
 

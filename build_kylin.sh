@@ -1,21 +1,26 @@
 #!/bin/bash
-# 【在麒麟系统上运行】用 PyInstaller 打包成单个可执行文件 dist/排班系统
-# 依赖：麒麟自带 python3；首次需联网执行 pip install pyinstaller
-# 注意：必须在目标麒麟机器（及对应CPU架构）上打包，Mac/其他Linux无法交叉编译
+# 【在麒麟/目标 Linux 上运行】用 PyInstaller 打包成单个可执行文件 dist/排班系统
+# 必须在目标机器（相同 CPU 架构与 glibc）上打包，不能跨机器交叉编译
 set -e
 cd "$(dirname "$0")"
 
-if ! command -v pyinstaller >/dev/null 2>&1; then
-    echo "未安装 pyinstaller，正在安装（需联网）..."
-    python3 -m pip install --user pyinstaller || {
-        echo "自动安装失败，请手动安装：python3 -m pip install --user pyinstaller"
+ARGS=(--noconfirm --onefile --name 排班系统 --add-data "static:static" --paths . server.py)
+
+if python3 -c "import PyInstaller" >/dev/null 2>&1; then
+    python3 -m PyInstaller "${ARGS[@]}"
+else
+    echo "未找到 PyInstaller，安装到本地目录（需联网，不改动系统 Python）..."
+    rm -rf .pybuild_deps
+    python3 -m pip install --quiet --target .pybuild_deps pyinstaller || {
+        echo "安装失败；可尝试：python3 -m pip install --user pyinstaller --break-system-packages"
         exit 1
     }
+    PYTHONPATH="$(pwd)/.pybuild_deps" python3 -m PyInstaller "${ARGS[@]}"
+    rm -rf .pybuild_deps
 fi
 
-python3 -m PyInstaller --noconfirm --onefile --name 排班系统 \
-    --add-data "static:static" \
-    --paths . server.py
+rm -rf build
+rm -f ./*.spec
 
 echo ""
 echo "完成: $(pwd)/dist/排班系统"

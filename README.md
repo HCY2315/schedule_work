@@ -117,7 +117,8 @@
 - 每人明细：各考勤类型计数、**总班次**、**总分数**（按该任务/人员分开累计）。
 - 小计按排班表汇总；全员合计计**唯一人数**与排班表数。
 - 分区与考勤分组支持**折叠**，且折叠状态需**持久**（重渲染后不丢失）。
-- 可按年份查看（当前年 / 前两年 / 全部）。
+- 时间维度：可按**年份**查看（当前年 / 前两年 / 全部）；选定年份后还可按**月份**查看（1–12 月 / **全部月份**）。
+  - 「全部月份」= 整个所选年份（与旧的年维度一致）；「全部（年份）」= 历年合计，此时月份选择禁用（方案 A）。
 
 #### FR-11 考勤类型配置
 - 在「设置」页可视化增删改考勤类型：名称(label)、权重(weight)、是否不在岗(unavailable)。
@@ -231,8 +232,8 @@ REST，JSON 收发。基址 `http://127.0.0.1:8686`。
 | GET | `/api/cover/suggest` | 顶班候选与建议 |
 | POST | `/api/cover` | 应用顶班 |
 | DELETE | `/api/cover` | 撤销顶班 |
-| GET | `/api/stats` | 统计（按排班表分区） |
-| GET | `/api/stats/detail` | 统计明细 |
+| GET | `/api/stats` | 统计（按排班表分区；`?year=Y&month=M`，`month` 省略=整年，`year=0`=历年） |
+| GET | `/api/stats/detail` | 统计明细（`?person_id=P&year=Y&month=M`） |
 
 ---
 
@@ -283,13 +284,14 @@ python3 dist/排班系统.pyz      # 运行（数据文件在 dist/data.db）
 python3 selftest.py            # 后端自测（业务规则/配置/分组/顶班/多班次/自检）
 ```
 
-- `selftest.py`：**100 项断言**，覆盖公平性、配置化、按排班表分组统计、顶班覆盖、多班次开关、数据自检、**人员软删除/恢复**、**增量重排**、**老库自动迁移**、**生成的时间重叠校验**等场景。
+- `selftest.py`：**105 项断言**，覆盖公平性、配置化、按排班表分组统计、顶班覆盖、多班次开关、数据自检、**人员软删除/恢复**、**增量重排**、**老库自动迁移**、**生成的时间重叠校验**、**统计按月查询**等场景。
 - 前端 E2E（可选，需 playwright-core + chromium）：
   ```bash
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/e2e.js       # 全流程回归（34 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat.js   # 设置页开关 + 自检 + 统计折叠（19 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat2.js  # 人员停用/恢复 + 增量重排（16 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat3.js  # 新增人员默认值 + 排班表纵向布局（11 项）
+  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat5.js  # 统计按月查询 + 全部月份=年（11 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/lazy.js      # 大数据(320行)统计懒渲染（7 项，需大数据库）
   ```
   E2E 断言**标签无关**（从 `/api/meta.att_kinds` 动态取名称/权重），可在 `A事/B事` 与 `事假/病假` 两种配置下通过。

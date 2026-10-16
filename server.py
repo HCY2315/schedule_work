@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """本地 Web 服务：Python 标准库实现，麒麟系统 Python3 可直接运行。"""
+import calendar
 import datetime
 import json
 import os
@@ -1129,14 +1130,21 @@ def cover_remove(qs):
 # ---------------------------------------------------------------- 统计
 
 
-def get_stats(qs):
+def _stats_range(qs):
     year = _int((qs.get("year") or [""])[0])
+    month = _int((qs.get("month") or [""])[0])
+    if year and year > 0:
+        if month and 1 <= month <= 12:
+            last = calendar.monthrange(year, month)[1]
+            return "%04d-%02d-01" % (year, month), "%04d-%02d-%02d" % (year, month, last)
+        return "%04d-01-01" % year, "%04d-12-31" % year
+    return "0000-01-01", "9999-12-31"
+
+
+def get_stats(qs):
+    y0, y1 = _stats_range(qs)
     conn = get_conn()
     try:
-        if year and year > 0:
-            y0, y1 = "%04d-01-01" % year, "%04d-12-31" % year
-        else:
-            y0, y1 = "0000-01-01", "9999-12-31"
         persons = [
             dict(r)
             for r in conn.execute(
@@ -1206,13 +1214,9 @@ def get_stats(qs):
 
 def get_stats_detail(qs):
     person_id = _int((qs.get("person_id") or [""])[0])
-    year = _int((qs.get("year") or [""])[0])
     if not person_id:
         return _err("缺少人员")
-    if year and year > 0:
-        y0, y1 = "%04d-01-01" % year, "%04d-12-31" % year
-    else:
-        y0, y1 = "0000-01-01", "9999-12-31"
+    y0, y1 = _stats_range(qs)
     conn = get_conn()
     try:
         rows = conn.execute(

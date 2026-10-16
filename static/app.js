@@ -71,6 +71,7 @@ const state = {
   month: currentMonth(),
   attendanceDate: today(),
   statsYear: new Date().getFullYear(),
+  statsMonth: 0,
   attClosed: {},
   statsClosed: {},
   statsGroups: null,
@@ -1154,18 +1155,34 @@ async function revokeCover(taskId, positionId) {
 }
 
 /* ================= 统计 ================= */
+function statsRangeLabel() {
+  if (state.statsYear === 0) return '全部年份';
+  if (state.statsMonth) return state.statsYear + '年' + state.statsMonth + '月';
+  return state.statsYear + '年';
+}
+function statsQuery() {
+  let q = '?year=' + state.statsYear;
+  if (state.statsYear !== 0 && state.statsMonth) q += '&month=' + state.statsMonth;
+  return q;
+}
 function renderStats() {
   const el = $('#tab-stats');
   const cur = new Date().getFullYear();
-  let opts = '';
+  let yopts = '';
   [cur, cur - 1, cur - 2].forEach(function (v) {
-    opts += '<option value="' + v + '"' + (v === state.statsYear ? ' selected' : '') + '>' + v + '年</option>';
+    yopts += '<option value="' + v + '"' + (v === state.statsYear ? ' selected' : '') + '>' + v + '年</option>';
   });
-  opts += '<option value="0"' + (state.statsYear === 0 ? ' selected' : '') + '>全部</option>';
+  yopts += '<option value="0"' + (state.statsYear === 0 ? ' selected' : '') + '>全部</option>';
+  const yearAll = state.statsYear === 0;
+  let mopts = '<option value="0"' + (!yearAll && state.statsMonth === 0 ? ' selected' : '') + '>全部月份</option>';
+  for (let m = 1; m <= 12; m++) {
+    mopts += '<option value="' + m + '"' + (!yearAll && state.statsMonth === m ? ' selected' : '') + '>' + m + '月</option>';
+  }
   el.innerHTML =
-    '<div class="toolbar"><label>统计年份</label>' +
-    '<select onchange="state.statsYear=Number(this.value);renderStats()">' + opts + '</select>' +
-    '<span class="muted">总分数 = ' + esc(weightHint()) + '</span></div>' +
+    '<div class="toolbar"><label>统计时间</label>' +
+    '<select onchange="state.statsYear=Number(this.value);state.statsMonth=0;renderStats()">' + yopts + '</select>' +
+    '<select ' + (yearAll ? 'disabled ' : '') + 'onchange="state.statsMonth=Number(this.value);renderStats()">' + mopts + '</select>' +
+    '<span class="muted">范围：' + esc(statsRangeLabel()) + ' · 总分数 = ' + esc(weightHint()) + '</span></div>' +
     '<div id="stats-body"><div class="card">加载中…</div></div>';
   loadStats();
 }
@@ -1174,7 +1191,7 @@ async function loadStats() {
   if (!box) return;
   let data;
   try {
-    data = await get('/api/stats?year=' + state.statsYear);
+    data = await get('/api/stats' + statsQuery());
   } catch (e) {
     box.innerHTML = '<div class="card error-text">' + esc(e.message) + '</div>';
     return;
@@ -1268,10 +1285,10 @@ function toggleStatsGroup(key) {
 async function openDetail(pid, name) {
   openModal('明细：' + name, '<div class="muted">加载中…</div>');
   try {
-    const rows = await get('/api/stats/detail?person_id=' + pid + '&year=' + state.statsYear);
+    const rows = await get('/api/stats/detail?person_id=' + pid + '&' + statsQuery().slice(1));
     let h = '';
     if (!rows.length) {
-      h = '<div class="muted">该年份没有排班记录。</div>';
+      h = '<div class="muted">该范围（' + esc(statsRangeLabel()) + '）内没有排班记录。</div>';
     } else {
       let total = 0;
       rows.forEach(function (r) {

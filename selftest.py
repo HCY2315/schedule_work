@@ -731,6 +731,37 @@ def scenario_rename_migration():
     check("二次启动幂等（不重复插入/改名）", n == 5 and renamed == perms, "n=%d %s" % (n, renamed))
 
 
+def scenario_stats_month():
+    print("== 统计：按月查询（全部月份=年维度，年=全部则忽略月）")
+    conn, perms, cats = fresh("statsmonth.db")
+    rid = make_roster(conn, perms, cats, 6)
+    tid = make_task(perms, rid, 3)
+    sc.generate_month(tid, 2026, 10)
+    sc.generate_month(tid, 2026, 11)
+    oct_rows = conn.execute(
+        "SELECT COUNT(*) c FROM schedules WHERE task_id=? AND date LIKE '2026-10%'", (tid,)).fetchone()["c"]
+    nov_rows = conn.execute(
+        "SELECT COUNT(*) c FROM schedules WHERE task_id=? AND date LIKE '2026-11%'", (tid,)).fetchone()["c"]
+
+    def total(stats):
+        return sum(r["count"] for r in stats)
+
+    st, s_oct = server.get_stats({"year": ["2026"], "month": ["10"]})
+    check("按月(10月)只含当月班次", st == 200 and total(s_oct) == oct_rows, "got=%d want=%d" % (total(s_oct), oct_rows))
+    st, s_nov = server.get_stats({"year": ["2026"], "month": ["11"]})
+    check("按月(11月)只含当月班次", total(s_nov) == nov_rows, "got=%d want=%d" % (total(s_nov), nov_rows))
+    st, s_year = server.get_stats({"year": ["2026"]})
+    check("全部月份=年维度(两月合计)", total(s_year) == oct_rows + nov_rows, "got=%d want=%d" % (total(s_year), oct_rows + nov_rows))
+    st, s_all = server.get_stats({"year": ["0"], "month": ["10"]})
+    check("年=全部时忽略月份(全时间)", total(s_all) == oct_rows + nov_rows, "got=%d" % total(s_all))
+
+    pid = conn.execute("SELECT id FROM persons ORDER BY id LIMIT 1").fetchone()["id"]
+    st, d_oct = server.get_stats_detail({"person_id": [str(pid)], "year": ["2026"], "month": ["10"]})
+    only_oct = all(r["date"].startswith("2026-10") for r in d_oct)
+    check("明细按月过滤（仅 2026-10）", st == 200 and only_oct and len(d_oct) > 0, "n=%d" % len(d_oct))
+    conn.close()
+
+
 def main():
     global TMP
     TMP = tempfile.mkdtemp(prefix="workday_selftest_")
@@ -751,6 +782,7 @@ def main():
         scenario_migrate_old_db()
         scenario_rename_migration()
         scenario_overlap_validation()
+        scenario_stats_month()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

@@ -861,6 +861,8 @@ def put_settings(body):
             return _err("multi_shift 只能取 0/1")
         if k == "show_disabled" and str(v).lower() not in ("0", "1", "true", "false", "on", "off", "yes", "no"):
             return _err("show_disabled 只能取 0/1")
+        if k == "cover_multi_shift" and str(v).lower() not in ("0", "1", "true", "false", "on", "off", "yes", "no"):
+            return _err("cover_multi_shift 只能取 0/1")
         db.set_setting(k, v)
     return _ok(dict(db.settings_map()))
 

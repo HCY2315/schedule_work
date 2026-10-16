@@ -9,6 +9,7 @@ from db import (
     get_conn,
     att_kinds_map,
     multi_shift_enabled,
+    cover_multi_shift_enabled,
 )
 
 
@@ -430,7 +431,7 @@ def suggest_covers(conn, task_id, date, position_id, limit=None):
     ).fetchone()["roster_id"])
     yslots = _yesterday_slots(conn, task_id, date)
     scores = year_scores(conn)
-    multi = multi_shift_enabled()
+    allow_multi = multi_shift_enabled() or cover_multi_shift_enabled()
     day_busy = load_day_busy(conn, date)
     base_row = conn.execute(
         "SELECT person_id FROM schedules WHERE task_id=? AND date=? AND position_id=? AND cover_of IS NULL",
@@ -446,7 +447,7 @@ def suggest_covers(conn, task_id, date, position_id, limit=None):
             continue
         if not _perm_ok(p, pos):
             continue
-        busy = has_conflict(day_busy.get(p["id"], []), slot["start"], slot["end"], multi=multi)
+        busy = has_conflict(day_busy.get(p["id"], []), slot["start"], slot["end"], multi=allow_multi)
         risky = yslots.get(p["id"]) == slot["id"]
         out.append(
             {
@@ -504,17 +505,20 @@ def apply_cover(conn, task_id, date, position_id, person_id):
     slot = dict(conn.execute("SELECT * FROM slots WHERE id=?", (row["slot_id"],)).fetchone())
     # 允许选择当天已排人员：同任务内自动移入本岗位，跨任务按冲突规则拦截；昨天同班次不再硬拦截。
     multi = multi_shift_enabled()
+    cover_multi = cover_multi_shift_enabled()
     for b in busy_intervals(conn, person_id, date):
-        if b[2] == task_id:
+        same_task = (b[2] == task_id)
+        if same_task and not cover_multi:
             continue
-        if not multi:
+        if not same_task and not (multi or cover_multi):
             raise ValueError("该人员当天已在其他任务排班")
         if _overlaps((slot["start"], slot["end"]), (b[0], b[1])):
-            raise ValueError("该人员此时段已在其他任务排班")
-    conn.execute(
-        "DELETE FROM schedules WHERE person_id=? AND date=? AND task_id=?",
-        (person_id, date, task_id),
-    )
+            raise ValueError("该人员此时段已有排班")
+    if not cover_multi:
+        conn.execute(
+            "DELETE FROM schedules WHERE person_id=? AND date=? AND task_id=?",
+            (person_id, date, task_id),
+        )
     conn.execute(
         "INSERT INTO schedules(task_id, date, slot_id, position_id, person_id, cover_of) "
         "VALUES(?,?,?,?,?,?)",

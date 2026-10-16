@@ -115,6 +115,7 @@ def norm_kind(kind):
 DEFAULT_SETTINGS = {
     "multi_shift": "1",
     "show_disabled": "0",
+    "cover_multi_shift": "0",
 }
 
 
@@ -153,6 +154,10 @@ def set_setting(key, value):
 
 def multi_shift_enabled():
     return get_setting("multi_shift", "0").lower() in ("1", "true", "yes", "on")
+
+
+def cover_multi_shift_enabled():
+    return get_setting("cover_multi_shift", "0").lower() in ("1", "true", "yes", "on")
 
 
 def hhmm(minutes):

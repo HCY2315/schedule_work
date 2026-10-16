@@ -847,6 +847,53 @@ def scenario_cover_selfcheck():
     conn.close()
 
 
+def scenario_cover_multi():
+    print("== 顶班多班开关（仅影响顶班，不改排班算法）")
+
+    def build(setting, name):
+        conn, perms, cats = fresh(name)
+        db.set_setting("cover_multi_shift", setting)
+        allp = db._dumps(sorted(perms.values()))
+        rid = conn.execute("INSERT INTO rosters(name) VALUES(?)", (name,)).lastrowid
+        for i in range(6):
+            conn.execute("INSERT INTO persons(roster_id,name,code,perm_ids) VALUES(?,?,?,?)",
+                         (rid, "P%02d" % (i + 1), "E%03d" % (i + 1), allp))
+        tid = conn.execute("INSERT INTO tasks(name,roster_id) VALUES(?,?)", (name, rid)).lastrowid
+        for s, (st, en) in enumerate([("00:00", "08:00"), ("16:00", "24:00"), ("04:00", "12:00")]):
+            sid = conn.execute('INSERT INTO slots(task_id,idx,start,"end") VALUES(?,?,?,?)', (tid, s, st, en)).lastrowid
+            conn.execute("INSERT INTO positions(slot_id,name,perm_id) VALUES(?,'岗',NULL)", (sid,))
+        conn.commit()
+        sc.generate_month(tid, 2026, 10)
+        poss = [r["id"] for r in conn.execute(
+            "SELECT po.id FROM positions po JOIN slots s ON s.id=po.slot_id WHERE s.task_id=? ORDER BY s.idx", (tid,))]
+        return conn, tid, poss
+
+    d = "2026-10-10"
+
+    def base_pid(conn, tid, pos_id):
+        return conn.execute(
+            "SELECT person_id FROM schedules WHERE task_id=? AND date=? AND position_id=? AND cover_of IS NULL",
+            (tid, d, pos_id)).fetchone()["person_id"]
+
+    def rows(conn, tid, pid):
+        return conn.execute(
+            "SELECT COUNT(*) c FROM schedules WHERE task_id=? AND date=? AND person_id=?", (tid, d, pid)).fetchone()["c"]
+
+    conn, tid, poss = build("0", "covermulti_off.db")
+    cov = base_pid(conn, tid, poss[0])
+    st, _ = server.cover_apply({"task_id": tid, "date": d, "position_id": poss[1], "person_id": cov})
+    check("顶班多班关闭：顶班人当天仅 1 班（移动语义）", st == 200 and rows(conn, tid, cov) == 1, "st=%s rows=%d" % (st, rows(conn, tid, cov)))
+    conn.close()
+
+    conn, tid, poss = build("1", "covermulti_on.db")
+    cov = base_pid(conn, tid, poss[0])
+    st, _ = server.cover_apply({"task_id": tid, "date": d, "position_id": poss[1], "person_id": cov})
+    check("顶班多班开启：顶班人当天 2 班（保留原班+顶班）", st == 200 and rows(conn, tid, cov) == 2, "st=%s rows=%d" % (st, rows(conn, tid, cov)))
+    st2, d2 = server.cover_apply({"task_id": tid, "date": d, "position_id": poss[2], "person_id": cov})
+    check("顶班多班开启：时间重叠的顶班仍被拦截", st2 != 200, "st=%s %s" % (st2, d2))
+    conn.close()
+
+
 def main():
     global TMP
     TMP = tempfile.mkdtemp(prefix="workday_selftest_")
@@ -870,6 +917,7 @@ def main():
         scenario_stats_month()
         scenario_fairness_slots()
         scenario_cover_selfcheck()
+        scenario_cover_multi()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

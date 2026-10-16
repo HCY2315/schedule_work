@@ -368,14 +368,15 @@ function kindMark(item) {
 function gridHTML(d) {
   const wd = ['一', '二', '三', '四', '五', '六', '日'];
   const td = today();
-  let h = '<table class="sched"><thead><tr><th class="corner">班次 ＼ 日期</th>';
-  d.days.forEach(function (day) {
-    h += '<th class="' + (day.date === td ? 'today' : '') + '">' + day.day + '日 周' + wd[day.weekday] + '</th>';
+  let h = '<table class="sched"><thead><tr><th class="corner">日期＼ 班次</th>';
+  d.slots.forEach(function (s) {
+    h += '<th>' + esc(s.start) + '-' + esc(s.end) + '</th>';
   });
   h += '</tr></thead><tbody>';
-  d.slots.forEach(function (s) {
-    h += '<tr><td class="timecol">' + esc(s.start) + '-' + esc(s.end) + '</td>';
-    d.days.forEach(function (day) {
+  d.days.forEach(function (day) {
+    const isToday = day.date === td;
+    h += '<tr><td class="timecol' + (isToday ? ' today' : '') + '">' + day.day + '日 周' + wd[day.weekday] + '</td>';
+    d.slots.forEach(function (s) {
       let inner = '';
       s.positions.forEach(function (p) {
         const rows = (d.cells[day.date] || {})[p.id] || [];
@@ -395,7 +396,7 @@ function gridHTML(d) {
         if (covers.length && base.kind && base.kind !== 'normal') who += ' ' + kindMark(base);
         inner += '<div class="sched-pos"><span class="pn">' + esc(p.name) + '</span> ' + who + '</div>';
       });
-      h += '<td class="cell' + (day.date === td ? ' today' : '') + '" onclick="openAssignModal(\'' + day.date + '\',' + s.id + ')">' + (inner || '<span class="sched-empty">—</span>') + '</td>';
+      h += '<td class="cell' + (isToday ? ' today' : '') + '" onclick="openAssignModal(\'' + day.date + '\',' + s.id + ')">' + (inner || '<span class="sched-empty">—</span>') + '</td>';
     });
     h += '</tr>';
   });
@@ -620,7 +621,7 @@ async function toggleShowDisabled(on) {
 }
 function openPersonModal(pid) {
   const p = pid ? state.persons.find(function (x) { return x.id === pid; }) : null;
-  const catId = p ? p.category_id : (state.meta.categories.length ? state.meta.categories[0].id : null);
+  const catId = p ? p.category_id : null;
   const permSet = new Set(p ? (p.perm_ids || []) : []);
   let h = '<input type="hidden" id="pf-id" value="' + (p ? p.id : '') + '">' +
     '<div class="form-row"><label>姓名 *</label><input type="text" id="pf-name" value="' + esc(p ? p.name : '') + '"></div>' +

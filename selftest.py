@@ -625,6 +625,74 @@ def scenario_migrate_old_db():
     conn.close()
 
 
+def scenario_overlap_validation():
+    print("== 生成的时间重叠校验（整月 & 增量）")
+
+    def tm(t):
+        return int(t[:2]) * 60 + int(t[3:5])
+
+    def ovl(a, b):
+        return tm(a[0]) < tm(b[1]) and tm(b[0]) < tm(a[1])
+
+    conn, perms, cats = fresh("overlap.db")
+    allp = db._dumps(sorted(perms.values()))
+
+    def build(name, s2):
+        cur = conn.execute("INSERT INTO rosters(name) VALUES(?)", (name + "-名单",))
+        rid = cur.lastrowid
+        for i in range(4):
+            conn.execute("INSERT INTO persons(roster_id,name,code,category_id,perm_ids) VALUES(?,?,?,?,?)",
+                         (rid, "P%d" % i, "E%d" % i, cats[i % len(cats)], allp))
+        tid = conn.execute("INSERT INTO tasks(name, roster_id) VALUES(?,?)", (name, rid)).lastrowid
+        i1 = conn.execute('INSERT INTO slots(task_id, idx, start, "end") VALUES(?,0,?,?)', (tid, "08:00", "16:00")).lastrowid
+        i2 = conn.execute('INSERT INTO slots(task_id, idx, start, "end") VALUES(?,1,?,?)', (tid, s2[0], s2[1])).lastrowid
+        conn.execute("INSERT INTO positions(slot_id, name, perm_id) VALUES(?,'岗A',NULL)", (i1,))
+        conn.execute("INSERT INTO positions(slot_id, name, perm_id) VALUES(?,'岗B',NULL)", (i2,))
+        conn.commit()
+        return tid
+
+    def overlap_pairs(tid):
+        rows = conn.execute(
+            "SELECT sc.person_id, sc.date, s.start, s.\"end\" FROM schedules sc "
+            "JOIN slots s ON s.id=sc.slot_id WHERE sc.task_id=? ORDER BY sc.date", (tid,)).fetchall()
+        by = {}
+        for r in rows:
+            by.setdefault((r["person_id"], r["date"]), []).append((r["start"], r["end"]))
+        return sum(1 for iv in by.values()
+                   for i in range(len(iv)) for j in range(i + 1, len(iv)) if ovl(iv[i], iv[j]))
+
+    def max_per_person_day(tid):
+        rows = conn.execute(
+            "SELECT person_id, date, COUNT(*) c FROM schedules WHERE task_id=? GROUP BY person_id, date", (tid,)).fetchall()
+        return max((r["c"] for r in rows), default=0)
+
+    db.set_setting("multi_shift", "1")
+    t_ov = build("重叠时段", ("10:00", "18:00"))
+    sc.generate_month(t_ov, 2026, 10)
+    check("多班次开启·时段重叠(08-16/10-18)不产生同人同天重叠", overlap_pairs(t_ov) == 0, "重叠对=%d" % overlap_pairs(t_ov))
+
+    t_no = build("不重叠时段", ("16:00", "24:00"))
+    sc.generate_month(t_no, 2026, 10)
+    n_no = conn.execute("SELECT COUNT(*) c FROM schedules WHERE task_id=?", (t_no,)).fetchone()["c"]
+    check("多班次开启·时段不重叠可整天连排(31天x2班)", n_no == 62, "行数=%d" % n_no)
+
+    db.set_setting("multi_shift", "0")
+    t_one = build("单班模式", ("16:00", "24:00"))
+    sc.generate_month(t_one, 2026, 10)
+    check("多班次关闭·每人每天最多一班", max_per_person_day(t_one) <= 1, "最大=%d" % max_per_person_day(t_one))
+
+    db.set_setting("multi_shift", "1")
+    t_inc = build("增量重叠", ("16:00", "24:00"))
+    sc.generate_month(t_inc, 2026, 10)
+    rid_inc = conn.execute("SELECT roster_id FROM tasks WHERE id=?", (t_inc,)).fetchone()["roster_id"]
+    conn.execute("INSERT INTO persons(roster_id,name,code,category_id,perm_ids) VALUES(?,?,?,?,?)",
+                 (rid_inc, "NEW", "E999", cats[0], allp))
+    conn.commit()
+    sc.generate_month(t_inc, 2026, 10, "2026-10-16")
+    check("增量重排后仍无同人同天重叠", overlap_pairs(t_inc) == 0, "重叠对=%d" % overlap_pairs(t_inc))
+    conn.close()
+
+
 def main():
     global TMP
     TMP = tempfile.mkdtemp(prefix="workday_selftest_")
@@ -643,6 +711,7 @@ def main():
         scenario_soft_delete()
         scenario_incremental()
         scenario_migrate_old_db()
+        scenario_overlap_validation()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

@@ -80,12 +80,11 @@ def load_task(conn, task_id):
     slots = []
     for s in conn.execute("SELECT * FROM slots WHERE task_id=?", (task_id,)):
         sd = dict(s)
-        sd["positions"] = [
-            dict(p)
-            for p in conn.execute(
-                "SELECT * FROM positions WHERE slot_id=? ORDER BY id", (sd["id"],)
-            )
-        ]
+        sd["positions"] = []
+        for p in conn.execute("SELECT * FROM positions WHERE slot_id=? ORDER BY id", (sd["id"],)):
+            pd = dict(p)
+            pd["perm_ids"] = json.loads(pd.get("perm_ids") or "[]")
+            sd["positions"].append(pd)
         slots.append(sd)
     slots.sort(key=lambda x: _tomin(x["start"]))
     task["slots"] = slots
@@ -238,10 +237,16 @@ def _yesterday_slots(conn, task_id, date):
 
 
 def _perm_ok(person, position):
-    pid = position.get("perm_id")
-    if pid is None:
+    need = position.get("perm_ids")
+    if isinstance(need, str):
+        need = json.loads(need or "[]")
+    if not need:
+        pid = position.get("perm_id")
+        need = [pid] if pid is not None else []
+    if not need:
         return True
-    return pid in (person.get("perm_ids") or [])
+    have = set(person.get("perm_ids") or [])
+    return all(x in have for x in need)
 
 
 def _unavailable(conn, person_id, date):

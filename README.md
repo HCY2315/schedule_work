@@ -46,11 +46,11 @@
 |---|---|
 | 名单（roster） | 一组人员的集合，一个排班任务绑定一个名单 |
 | 人员（person） | 属于某个名单，拥有多个权限、一个可选首选权限、一个类别 |
-| 权限（permission） | 如 消防、电工、急救…，岗位可要求某权限；人员需具备对应权限才能上该岗 |
+| 权限（permission） | 如 消防、电工、急救…；岗位可要求**多个**权限，人员需**全部满足**才能上该岗 |
 | 类别（category） | 一组默认权限（如「管理岗」=全部技能），可快速给人员套用 |
 | 任务/排班表（task） | 一个排班表就是一个任务，绑定一个名单，含若干**班次时段** |
 | 班次时段（slot） | 如「早班 08:00-16:00」，一个任务内可有多个时段 |
-| 岗位（position） | 班次内的具体岗位，可要求某权限（可为空=不限） |
+| 岗位（position） | 班次内的具体岗位，可要求**多个权限**（需全部满足；为空=不限） |
 | 排班（schedule） | 某天某岗位安排某人 |
 | 考勤类型（att_kind） | 正常 / A事 / B事 / 缺勤 等，含**权重**与**是否不在岗** |
 | 考勤记录（attendance） | 某人某天的考勤类型与事由 |
@@ -84,7 +84,7 @@
 
 #### FR-5 排班任务
 - 新建任务：名称 + 所属名单。
-- 为任务配置**多个班次时段**（起止时间）与每个时段的**岗位**（岗位名 + 可选权限要求）。
+- 为任务配置**多个班次时段**（起止时间）与每个时段的**岗位**（岗位名 + 可勾选**多个权限**，人员需**全部满足**才能胜任该岗）。
 - 一个排班表 = 一个任务。
 
 #### FR-6 自动排班
@@ -187,7 +187,7 @@
 | `persons` | `id, roster_id, name, code, phone, category_id, perm_ids(JSON), preferred_perm_id, remark, status, deleted_at` | 人员；`status`=`active`/`disabled`（软删除），`deleted_at` 记录停用时间 |
 | `tasks` | `id, name, roster_id` | 排班任务（=排班表） |
 | `slots` | `id, task_id, idx, start, "end"` | 班次时段 |
-| `positions` | `id, slot_id, name, perm_id` | 岗位（perm_id 可空） |
+| `positions` | `id, slot_id, name, perm_id, perm_ids(JSON)` | 岗位要求的权限集合（`perm_ids` 为准，需全部满足；`perm_id` 为兼容镜像=首个） |
 | `schedules` | `id, task_id, date, slot_id, position_id, person_id, cover_of`，`UNIQUE(task_id,date,position_id,person_id)` | 排班记录；`cover_of` 指向被顶班者 |
 | `attendance` | `id, person_id, date, kind, reason`，`UNIQUE(person_id,date)` | 考勤记录 |
 | `att_kinds` | `kind(PK), label, weight, unavailable, sort` | 考勤类型配置（运行期唯一来源） |
@@ -289,7 +289,7 @@ python3 dist/排班系统.pyz      # 运行（数据文件在 dist/data.db）
 python3 selftest.py            # 后端自测（业务规则/配置/分组/顶班/多班次/自检）
 ```
 
-- `selftest.py`：**117 项断言**，覆盖公平性（含**时段均衡**与**缺人轮换空岗**）、配置化、按排班表分组统计、顶班覆盖、多班次开关、数据自检、**人员软删除/恢复**、**增量重排**、**老库自动迁移**、**生成的时间重叠校验**、**统计按月查询**、**顶班自检/修复**、**顶班多班开关**等场景。
+- `selftest.py`：**124 项断言**，覆盖公平性（含**时段均衡**与**缺人轮换空岗**）、配置化、按排班表分组统计、顶班覆盖、多班次开关、数据自检、**人员软删除/恢复**、**增量重排**、**老库自动迁移**、**生成的时间重叠校验**、**统计按月查询**、**顶班自检/修复**、**顶班多班开关**、**岗位多权限**、**positions 老库迁移**等场景。
 - 前端 E2E（可选，需 playwright-core + chromium）：
   ```bash
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/e2e.js       # 全流程回归（34 项）
@@ -297,6 +297,7 @@ python3 selftest.py            # 后端自测（业务规则/配置/分组/顶�
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat2.js  # 人员停用/恢复 + 增量重排（16 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat3.js  # 新增人员默认值 + 排班表纵向布局（11 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat5.js  # 统计按月查询 + 全部月份=年（11 项）
+  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat6.js  # 岗位多权限（编辑器复选框）（8 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/lazy.js      # 大数据(320行)统计懒渲染（7 项，需大数据库）
   ```
   E2E 断言**标签无关**（从 `/api/meta.att_kinds` 动态取名称/权重），可在 `A事/B事` 与 `事假/病假` 两种配置下通过。

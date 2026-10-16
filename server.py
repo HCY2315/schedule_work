@@ -133,7 +133,10 @@ def delete_permissions(pid):
             ids = [i for i in _loads(r["perm_ids"]) if i != pid]
             conn.execute("UPDATE categories SET perm_ids=? WHERE id=?", (_dumps(ids), r["id"]))
         conn.execute("UPDATE categories SET preferred_perm_id=NULL WHERE preferred_perm_id=?", (pid,))
-        conn.execute("UPDATE positions SET perm_id=NULL WHERE perm_id=?", (pid,))
+        for r in conn.execute("SELECT id, perm_ids FROM positions").fetchall():
+            ids = [i for i in _loads(r["perm_ids"] or "[]") if i != pid]
+            conn.execute("UPDATE positions SET perm_ids=?, perm_id=? WHERE id=?",
+                         (_dumps(ids), (ids[0] if ids else None), r["id"]))
         conn.commit()
         return _ok()
     finally:
@@ -394,7 +397,12 @@ def _validate_slots(slots):
         pnorm = []
         for j, p in enumerate(positions):
             pname = (p.get("name") or "").strip() or ("岗位%d" % (j + 1))
-            pnorm.append({"id": p.get("id"), "name": pname, "perm_id": p.get("perm_id")})
+            pids = p.get("perm_ids")
+            if pids is None:
+                pids = [p["perm_id"]] if p.get("perm_id") is not None else []
+            pids = [int(x) for x in pids if x]
+            pnorm.append({"id": p.get("id"), "name": pname,
+                          "perm_id": (pids[0] if pids else None), "perm_ids": pids})
         norm.append({"id": s.get("id"), "start": start, "end": end, "positions": pnorm})
     return norm
 
@@ -437,13 +445,15 @@ def _write_positions(conn, slot_id, positions):
     kept = set()
     for p in positions:
         pid = p.get("id")
+        pids = _dumps(p.get("perm_ids") or [])
         if pid and pid in existing:
-            conn.execute("UPDATE positions SET name=?, perm_id=? WHERE id=?", (p["name"], p["perm_id"], pid))
+            conn.execute("UPDATE positions SET name=?, perm_id=?, perm_ids=? WHERE id=?",
+                         (p["name"], p.get("perm_id"), pids, pid))
             kept.add(pid)
         else:
             cur = conn.execute(
-                "INSERT INTO positions(slot_id, name, perm_id) VALUES(?,?,?)",
-                (slot_id, p["name"], p["perm_id"]),
+                "INSERT INTO positions(slot_id, name, perm_id, perm_ids) VALUES(?,?,?,?)",
+                (slot_id, p["name"], p.get("perm_id"), pids),
             )
             kept.add(cur.lastrowid)
     for pid in existing - kept:
@@ -594,7 +604,8 @@ def get_schedule(tid, qs):
                             "id": p["id"],
                             "name": p["name"],
                             "perm_id": p["perm_id"],
-                            "perm_name": _perm_name(conn, p["perm_id"]),
+                            "perm_ids": _loads(p["perm_ids"], []),
+                            "perm_name": _perm_names_str(conn, p["perm_ids"]) or _perm_name(conn, p["perm_id"]),
                         }
                         for p in s["positions"]
                     ],
@@ -610,6 +621,13 @@ def _perm_name(conn, perm_id):
         return ""
     r = conn.execute("SELECT name FROM permissions WHERE id=?", (perm_id,)).fetchone()
     return r["name"] if r else ""
+
+
+def _perm_names_str(conn, ids):
+    if isinstance(ids, str):
+        ids = _loads(ids, [])
+    names = [_perm_name(conn, x) for x in (ids or [])]
+    return "、".join(n for n in names if n)
 
 
 def assign(tid, body):
@@ -654,7 +672,10 @@ def assign(tid, body):
         if sc._unavailable(conn, person_id, date):
             return _err("该人员当天已登记不在岗（%s）" % absent_labels())
         if not sc._perm_ok(person, dict(pos)):
-            return _err("该人员没有此岗位所需权限「%s」" % _perm_name(conn, pos["perm_id"]))
+            need = _loads(pos["perm_ids"], []) or ([pos["perm_id"]] if pos["perm_id"] is not None else [])
+            have = set(person.get("perm_ids") or [])
+            missing = "、".join(_perm_name(conn, x) for x in need if x not in have)
+            return _err("该人员缺少岗位所需权限：%s" % missing)
         multi = db.multi_shift_enabled()
         other = [
             b
@@ -717,7 +738,7 @@ def get_attendance(qs):
         rows = conn.execute(
             "SELECT sc.task_id, t.name AS task_name, t.roster_id AS roster_id, "
             "ro.name AS roster_name, sc.slot_id, sc.position_id, sc.person_id, "
-            "sc.cover_of, s.start, s.\"end\", po.name AS position_name, po.perm_id, "
+            "sc.cover_of, s.start, s.\"end\", po.name AS position_name, po.perm_id, po.perm_ids, "
             "pe.name AS person_name "
             "FROM schedules sc "
             "JOIN tasks t ON t.id=sc.task_id "
@@ -744,7 +765,9 @@ def get_attendance(qs):
                     "end": r["end"],
                     "position_id": r["position_id"],
                     "position_name": r["position_name"],
-                    "perm_name": perms.get(r["perm_id"], ""),
+                    "perm_name": "、".join(
+                        n for n in (perms.get(x, "") for x in _loads(r["perm_ids"] or "[]")) if n
+                    ) or perms.get(r["perm_id"], ""),
                     "base": None,
                     "covers": [],
                 }

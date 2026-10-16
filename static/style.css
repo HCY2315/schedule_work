@@ -199,9 +199,11 @@ table.sched th.today, table.sched td.today { background: #fdf6e3; }
 .slot-editor { border: 1px solid #e1e6ec; border-radius: 6px; margin-bottom: 8px; background: #fff; }
 .slot-editor .s-head { display: flex; gap: 8px; align-items: center; padding: 8px 10px; background: #f7f9fc; border-bottom: 1px solid #edf1f5; flex-wrap: wrap; }
 .slot-editor .s-body { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
-.pos-line { display: flex; gap: 8px; align-items: center; }
+.pos-line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .pos-line input.pname { width: 140px; }
 .pos-line select { width: 140px; }
+.pos-line .pos-perm-label { white-space: nowrap; }
+.pos-line .pos-perms { display: inline-flex; flex-wrap: wrap; gap: 2px 10px; align-items: center; }
 
 .perm-box { display: flex; flex-wrap: wrap; gap: 8px 4px; }
 

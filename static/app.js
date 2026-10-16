@@ -167,7 +167,7 @@ function renderTasks() {
 function defaultSlots() {
   const a = [];
   for (let i = 0; i < 12; i++) {
-    a.push({ start: pad2(i * 2) + ':00', end: pad2(i * 2 + 2) + ':00', positions: [{ name: '岗位1', perm_id: null }] });
+    a.push({ start: pad2(i * 2) + ':00', end: pad2(i * 2 + 2) + ':00', positions: [{ name: '岗位1', perm_id: null, perm_ids: [] }] });
   }
   return a;
 }
@@ -201,14 +201,17 @@ async function deleteTask(id) {
 }
 
 function posLineHTML(i, p, j) {
-  let opts = '<option value="">不限权限</option>';
+  const pset = new Set(p.perm_ids || (p.perm_id != null ? [p.perm_id] : []));
+  let perms = '';
   state.meta.permissions.forEach(function (pm) {
-    opts += '<option value="' + pm.id + '"' + (p.perm_id === pm.id ? ' selected' : '') + '>需权限：' + esc(pm.name) + '</option>';
+    perms += '<label class="ck"><input type="checkbox"' + (pset.has(pm.id) ? ' checked' : '') +
+      ' onchange="setPosPerm(' + i + ',' + j + ',' + pm.id + ',this.checked)">' + esc(pm.name) + '</label>';
   });
+  if (!state.meta.permissions.length) perms = '<span class="muted">无权限可选</span>';
   return '<div class="pos-line">' +
     '<span class="muted" style="width:52px">岗位' + (j + 1) + '</span>' +
     '<input type="text" class="pname" placeholder="岗位名称" value="' + esc(p.name) + '" onchange="setPos(' + i + ',' + j + ',\'name\',this.value)">' +
-    '<select onchange="setPos(' + i + ',' + j + ',\'perm_id\',this.value?Number(this.value):null)">' + opts + '</select>' +
+    '<span class="muted pos-perm-label">需权限（需全部满足）：</span><span class="pos-perms">' + perms + '</span>' +
     '<button class="btn small danger" onclick="delPos(' + i + ',' + j + ')">删岗位</button>' +
     '</div>';
 }
@@ -262,15 +265,22 @@ function restoreDefaultSlots() {
 }
 function setSlot(i, field, v) { state.editTask.slots[i][field] = v.trim(); }
 function setPos(i, j, field, v) { state.editTask.slots[i].positions[j][field] = v; }
+function setPosPerm(i, j, pmId, checked) {
+  const pos = state.editTask.slots[i].positions[j];
+  const set = new Set(pos.perm_ids || (pos.perm_id != null ? [pos.perm_id] : []));
+  if (checked) set.add(pmId); else set.delete(pmId);
+  pos.perm_ids = Array.from(set).sort(function (a, b) { return a - b; });
+  pos.perm_id = pos.perm_ids.length ? pos.perm_ids[0] : null;
+}
 function setPosCount(i, n) {
   const s = state.editTask.slots[i];
   while (s.positions.length > n) s.positions.pop();
-  while (s.positions.length < n) s.positions.push({ name: '岗位' + (s.positions.length + 1), perm_id: null });
+  while (s.positions.length < n) s.positions.push({ name: '岗位' + (s.positions.length + 1), perm_id: null, perm_ids: [] });
   renderTasks();
 }
 function addPos(i) {
   const s = state.editTask.slots[i];
-  s.positions.push({ name: '岗位' + (s.positions.length + 1), perm_id: null });
+  s.positions.push({ name: '岗位' + (s.positions.length + 1), perm_id: null, perm_ids: [] });
   renderTasks();
 }
 function delPos(i, j) {
@@ -278,7 +288,7 @@ function delPos(i, j) {
   renderTasks();
 }
 function addSlot(i) {
-  state.editTask.slots.splice(i + 1, 0, { start: '00:00', end: '01:00', positions: [{ name: '岗位1', perm_id: null }] });
+  state.editTask.slots.splice(i + 1, 0, { start: '00:00', end: '01:00', positions: [{ name: '岗位1', perm_id: null, perm_ids: [] }] });
   renderTasks();
 }
 function removeSlot(i) {
@@ -500,7 +510,8 @@ async function openAssignModal(date, slotId) {
         const flags = [];
         let blocked = false;
         if (absent.has(pp.id)) { flags.push('不在岗'); blocked = true; }
-        if (p.perm_id && !(pp.perm_ids || []).includes(p.perm_id)) { flags.push('无权限'); blocked = true; }
+        const need = p.perm_ids || (p.perm_id != null ? [p.perm_id] : []);
+        if (need.length && need.some(function (id) { return !(pp.perm_ids || []).includes(id); })) { flags.push('无权限'); blocked = true; }
         if (busy.has(pp.id) && pp.id !== currentId) flags.push('当天已排');
         const dis = blocked ? ' disabled' : '';
         const sel = pp.id === currentId ? ' selected' : '';

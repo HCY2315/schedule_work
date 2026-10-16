@@ -202,6 +202,15 @@ def _migrate_rename_placeholders(conn):
         _rename_row(conn, "categories", old, new)
 
 
+def _migrate_positions_perm_ids(conn):
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(positions)")}
+    if "perm_ids" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN perm_ids TEXT NOT NULL DEFAULT '[]'")
+    for r in conn.execute("SELECT id, perm_id, perm_ids FROM positions"):
+        if r["perm_id"] is not None and not _loads(r["perm_ids"] or "[]"):
+            conn.execute("UPDATE positions SET perm_ids=? WHERE id=?", (_dumps([r["perm_id"]]), r["id"]))
+
+
 def init_db():
     conn = get_conn()
     # WAL：读写可并发，写锁粒度从库级降为事务级，多人同时保存不易 "database is locked"
@@ -252,7 +261,8 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             slot_id INTEGER NOT NULL,
             name TEXT NOT NULL,
-            perm_id INTEGER
+            perm_id INTEGER,
+            perm_ids TEXT NOT NULL DEFAULT '[]'
         );
         CREATE TABLE IF NOT EXISTS schedules(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -304,6 +314,7 @@ def init_db():
     _migrate_persons_soft_delete(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_persons_status ON persons(status)")
     _migrate_rename_placeholders(conn)
+    _migrate_positions_perm_ids(conn)
     _seed(conn)
     reload_att_kinds(conn)
     conn.commit()
@@ -348,8 +359,10 @@ def _dumps(v):
 def _loads(s, default=None):
     import json
 
-    if not s:
+    if s is None or s == "":
         return default if default is not None else []
+    if isinstance(s, (list, dict)):
+        return s
     try:
         return json.loads(s)
     except Exception:

@@ -894,6 +894,62 @@ def scenario_cover_multi():
     conn.close()
 
 
+def scenario_position_multi_perm():
+    print("== 岗位多权限（需全部满足）")
+    conn, perms, cats = fresh("posmulti.db")
+    px, pd, pj = perms["消防"], perms["电工"], perms["急救"]
+    rid = conn.execute("INSERT INTO rosters(name) VALUES('R')").lastrowid
+
+    def addp(name, ids):
+        return conn.execute("INSERT INTO persons(roster_id,name,code,perm_ids) VALUES(?,?,?,?)",
+                            (rid, name, name, db._dumps(ids))).lastrowid
+
+    p0 = addp("P0", [px, pd])
+    p1 = addp("P1", [px])
+    p2 = addp("P2", [pd])
+    p3 = addp("P3", [px, pd, pj])
+    tid = conn.execute("INSERT INTO tasks(name,roster_id) VALUES('T',?)", (rid,)).lastrowid
+    sid = conn.execute('INSERT INTO slots(task_id,idx,start,"end") VALUES(?,0,?,?)', (tid, "08:00", "16:00")).lastrowid
+    conn.execute("INSERT INTO positions(slot_id,name,perm_id,perm_ids) VALUES(?,'双证岗',?,?)",
+                 (sid, px, db._dumps([px, pd])))
+    conn.commit()
+    sc.generate_month(tid, 2026, 10)
+    assigned = {r["person_id"] for r in conn.execute("SELECT DISTINCT person_id FROM schedules WHERE task_id=?", (tid,))}
+    check("仅同时具备两项权限者可上岗", assigned <= {p0, p3}, "assigned=%s" % assigned)
+    check("缺任一权限者不被排入", (p1 not in assigned) and (p2 not in assigned), "")
+    check("具备全部权限者被排入", p0 in assigned, "")
+
+    person1 = dict(conn.execute("SELECT perm_ids FROM persons WHERE id=?", (p1,)).fetchone())
+    person1["perm_ids"] = db._loads(person1["perm_ids"])
+    check("_perm_ok 缺一项返回 False", sc._perm_ok(person1, {"perm_ids": [px, pd], "perm_id": px}) is False, "")
+    check("_perm_ok 空权限岗位返回 True", sc._perm_ok(person1, {"perm_ids": [], "perm_id": None}) is True, "")
+    conn.close()
+
+
+def scenario_positions_perm_ids_migration():
+    print("== 老库 positions 补 perm_ids（从 perm_id 回填）")
+    import sqlite3
+    path = os.path.join(TMP, "posmig.db")
+    if os.path.exists(path):
+        os.remove(path)
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        "CREATE TABLE positions(id INTEGER PRIMARY KEY AUTOINCREMENT, slot_id INTEGER NOT NULL, "
+        "name TEXT NOT NULL, perm_id INTEGER);"
+        "INSERT INTO positions(slot_id,name,perm_id) VALUES(1,'岗甲',3),(1,'岗乙',NULL);"
+    )
+    raw.commit()
+    raw.close()
+    db.DB_PATH = path
+    db._SETTINGS_CACHE = None
+    db.init_db()
+    conn = db.get_conn()
+    rows = {r["name"]: dict(r) for r in conn.execute("SELECT name, perm_id, perm_ids FROM positions")}
+    conn.close()
+    check("老库自动补 perm_ids 列并回填", rows["岗甲"]["perm_ids"] == "[3]", str(rows["岗甲"]))
+    check("原 perm_id 为空者回填空数组", rows["岗乙"]["perm_ids"] == "[]", str(rows["岗乙"]))
+
+
 def main():
     global TMP
     TMP = tempfile.mkdtemp(prefix="workday_selftest_")
@@ -918,6 +974,8 @@ def main():
         scenario_fairness_slots()
         scenario_cover_selfcheck()
         scenario_cover_multi()
+        scenario_position_multi_perm()
+        scenario_positions_perm_ids_migration()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

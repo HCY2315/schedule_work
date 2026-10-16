@@ -113,7 +113,7 @@ def norm_kind(kind):
 
 
 DEFAULT_SETTINGS = {
-    "multi_shift": "0",
+    "multi_shift": "1",
     "show_disabled": "0",
 }
 

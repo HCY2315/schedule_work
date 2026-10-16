@@ -171,8 +171,9 @@ def scenario_leave(n_persons=8, npos=2):
 
 
 def scenario_cross_task():
-    print("== 跨任务：同一人同一天不得重复排班")
+    print("== 跨任务：同一人同一天不得重复排班（多班次关闭时）")
     conn, perms, cats = fresh("cross.db")
+    db.set_setting("multi_shift", "0")
     rid = make_roster(conn, perms, cats, 6)
     t1 = make_task(perms, rid, 2)
     t2 = make_task(perms, rid, 2)
@@ -443,8 +444,9 @@ def scenario_group_and_cover():
 
 
 def scenario_cover_override():
-    print("== 顶班：已排/冲突人员可选（同任务自动移入），跨任务拦截")
+    print("== 顶班：已排/冲突人员可选（同任务自动移入），跨任务拦截（多班次关闭时）")
     conn, perms, cats = fresh("cover.db")
+    db.set_setting("multi_shift", "0")
     rid = make_roster(conn, perms, cats, 5)
     t1 = make_task(perms, rid, 2)
     t2 = make_task(perms, rid, 2)

@@ -367,14 +367,14 @@ def _generate_day(conn, task, roster, date, slot_ids, gen_count):
         pid = p["id"]
         if not _perm_ok(p, pos):
             return False
+        if pid in assigned or yslots.get(pid) == sid:
+            return False
         if multi:
             return not has_conflict(
                 day_busy.get(pid, []), slot_by_id[sid]["start"], slot_by_id[sid]["end"],
                 task["id"], pos["id"], multi=True,
             )
-        if pid in assigned or pid in day_busy:
-            return False
-        return yslots.get(pid) != sid
+        return pid not in day_busy
 
     def key(p, sid, pos):
         match = 0 if (p.get("preferred_perm_id") and p["preferred_perm_id"] == pos.get("perm_id")) else 1

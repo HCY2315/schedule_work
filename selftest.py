@@ -34,7 +34,8 @@ def fresh(name):
 def make_roster(conn, perms, cats, n):
     cur = conn.execute("INSERT INTO rosters(name) VALUES('R')")
     rid = cur.lastrowid
-    letters = [["A", "B", "C", "D", "E"], ["B", "C", "D", "E"], ["C", "D", "E"], ["D", "E"], ["E"]]
+    letters = [["消防", "电工", "急救", "驾驶", "厨师"], ["电工", "急救", "驾驶", "厨师"],
+               ["急救", "驾驶", "厨师"], ["驾驶", "厨师"], ["厨师"]]
     for i in range(n):
         ls = letters[i % len(letters)]
         conn.execute(
@@ -48,7 +49,7 @@ def make_roster(conn, perms, cats, n):
 
 
 def make_task(perms, rid, npos):
-    perms_cycle = ["E", "D", "C", None, "D", "E"]
+    perms_cycle = ["厨师", "驾驶", "急救", None, "驾驶", "厨师"]
     slots = [
         {
             "start": "%02d:00" % (i * 4),
@@ -374,12 +375,12 @@ def scenario_group_and_cover():
         )
         return cur.lastrowid
 
-    p0 = add(rid_a, "甲0", ["A", "E"])
-    p1 = add(rid_a, "甲1", ["E"])
-    p2 = add(rid_a, "甲2", ["E"])
-    p3 = add(rid_a, "甲3", ["B"])
-    p4 = add(rid_a, "甲4", ["E"])
-    p5 = add(rid_b, "乙0", ["E"])
+    p0 = add(rid_a, "甲0", ["消防", "厨师"])
+    p1 = add(rid_a, "甲1", ["厨师"])
+    p2 = add(rid_a, "甲2", ["厨师"])
+    p3 = add(rid_a, "甲3", ["电工"])
+    p4 = add(rid_a, "甲4", ["厨师"])
+    p5 = add(rid_b, "乙0", ["厨师"])
     conn.commit()
 
     t1 = make_task(perms, rid_a, 1)
@@ -455,10 +456,10 @@ def scenario_cover_override():
             "WHERE s.task_id=? AND po.perm_id=?", (tid, perms[pname])
         ).fetchone()
 
-    a1 = pos_by_perm(t1, "E")
-    a2 = pos_by_perm(t1, "D")
-    b1 = pos_by_perm(t2, "E")
-    c1 = pos_by_perm(t3, "E")
+    a1 = pos_by_perm(t1, "厨师")
+    a2 = pos_by_perm(t1, "驾驶")
+    b1 = pos_by_perm(t2, "厨师")
+    c1 = pos_by_perm(t3, "厨师")
     pids = [r["id"] for r in conn.execute("SELECT id FROM persons ORDER BY id")]
     p1, p2, p3, p4, p5 = pids[0], pids[1], pids[2], pids[3], pids[4]
     d, yd = "2026-10-10", "2026-10-09"
@@ -693,6 +694,41 @@ def scenario_overlap_validation():
     conn.close()
 
 
+def scenario_rename_migration():
+    print("== 旧库占位名称改名迁移（A~E / 一类~六类 → 真实名称）")
+    import sqlite3
+    path = os.path.join(TMP, "renamelib.db")
+    if os.path.exists(path):
+        os.remove(path)
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        "CREATE TABLE permissions(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, sort INTEGER NOT NULL DEFAULT 0);"
+        "CREATE TABLE categories(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+        "perm_ids TEXT NOT NULL DEFAULT '[]', preferred_perm_id INTEGER);"
+        "INSERT INTO permissions(name,sort) VALUES('A',0),('B',1),('C',2),('D',3),('E',4);"
+        "INSERT INTO categories(name,perm_ids) VALUES('一类','[1,2,3,4,5]'),('六类','[5]');"
+    )
+    raw.commit()
+    raw.close()
+
+    db.DB_PATH = path
+    db._SETTINGS_CACHE = None
+    db.init_db()
+    conn = db.get_conn()
+    perms = [r["name"] for r in conn.execute("SELECT name FROM permissions ORDER BY sort")]
+    cats = [r["name"] for r in conn.execute("SELECT name FROM categories ORDER BY id")]
+    conn.close()
+    check("旧权限 A~E 改名为真实名称", perms == ["消防", "电工", "急救", "驾驶", "厨师"], str(perms))
+    check("旧类别 一类/六类 改名为真实名称", cats[0] == "管理岗" and cats[-1] == "外包岗", str(cats))
+
+    db.init_db()
+    conn = db.get_conn()
+    n = conn.execute("SELECT COUNT(*) c FROM permissions").fetchone()["c"]
+    renamed = [r["name"] for r in conn.execute("SELECT name FROM permissions ORDER BY sort")]
+    conn.close()
+    check("二次启动幂等（不重复插入/改名）", n == 5 and renamed == perms, "n=%d %s" % (n, renamed))
+
+
 def main():
     global TMP
     TMP = tempfile.mkdtemp(prefix="workday_selftest_")
@@ -711,6 +747,7 @@ def main():
         scenario_soft_delete()
         scenario_incremental()
         scenario_migrate_old_db()
+        scenario_rename_migration()
         scenario_overlap_validation()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)

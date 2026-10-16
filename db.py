@@ -27,15 +27,24 @@ BASE_DIR = _base_dir()
 PYZ_FILE = _pyz_file()
 DB_PATH = os.path.join(BASE_DIR, "data.db")
 
-DEFAULT_PERMISSIONS = ["A", "B", "C", "D", "E"]
+DEFAULT_PERMISSIONS = ["消防", "电工", "急救", "驾驶", "厨师"]
 DEFAULT_CATEGORIES = [
     # (名称, 默认权限索引列表, 默认偏好权限索引)
-    ("一类", [0, 1, 2, 3, 4], 0),
-    ("二类", [1, 2, 3, 4], 1),
-    ("三类", [2, 3, 4], 2),
-    ("四类", [3, 4], 3),
-    ("五类", [4], 4),
-    ("六类", [4], 4),
+    ("管理岗", [0, 1, 2, 3, 4], 0),
+    ("技术岗", [1, 2, 3, 4], 1),
+    ("操作岗", [2, 3, 4], 2),
+    ("辅助岗", [3, 4], 3),
+    ("见习岗", [4], 4),
+    ("外包岗", [4], 4),
+]
+
+# 旧版占位名称 → 真实名称（仅用于对已存在的旧库做一次性、幂等的改名迁移）
+PERMISSION_RENAMES = [
+    ("A", "消防"), ("B", "电工"), ("C", "急救"), ("D", "驾驶"), ("E", "厨师"),
+]
+CATEGORY_RENAMES = [
+    ("一类", "管理岗"), ("二类", "技术岗"), ("三类", "操作岗"),
+    ("四类", "辅助岗"), ("五类", "见习岗"), ("六类", "外包岗"),
 ]
 
 SLOT_DEFAULT_TEMPLATE = [(i * 2, i * 2 + 2) for i in range(12)]
@@ -172,6 +181,22 @@ def _migrate_persons_soft_delete(conn):
         conn.execute("ALTER TABLE persons ADD COLUMN deleted_at TEXT")
 
 
+def _rename_row(conn, table, old, new):
+    row = conn.execute("SELECT id FROM %s WHERE name=?" % table, (old,)).fetchone()
+    if not row:
+        return
+    if conn.execute("SELECT 1 FROM %s WHERE name=?" % table, (new,)).fetchone():
+        return
+    conn.execute("UPDATE %s SET name=? WHERE id=?" % table, (new, row["id"]))
+
+
+def _migrate_rename_placeholders(conn):
+    for old, new in PERMISSION_RENAMES:
+        _rename_row(conn, "permissions", old, new)
+    for old, new in CATEGORY_RENAMES:
+        _rename_row(conn, "categories", old, new)
+
+
 def init_db():
     conn = get_conn()
     # WAL：读写可并发，写锁粒度从库级降为事务级，多人同时保存不易 "database is locked"
@@ -273,6 +298,7 @@ def init_db():
     # 先补齐软删除列（老库），再建依赖 status 列的索引，避免老库启动即失败
     _migrate_persons_soft_delete(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_persons_status ON persons(status)")
+    _migrate_rename_placeholders(conn)
     _seed(conn)
     reload_att_kinds(conn)
     conn.commit()

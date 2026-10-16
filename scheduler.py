@@ -503,7 +503,8 @@ def apply_cover(conn, task_id, date, position_id, person_id):
     if not _perm_ok(p, pos):
         raise ValueError("该人员没有此岗位所需权限")
     slot = dict(conn.execute("SELECT * FROM slots WHERE id=?", (row["slot_id"],)).fetchone())
-    # 允许选择当天已排人员：同任务内自动移入本岗位，跨任务按冲突规则拦截；昨天同班次不再硬拦截。
+    # 顶班冲突校验：同任务内默认「移入」（cover_multi 关闭时删除本人当天同任务排班）；
+    # 开启 cover_multi 则保留本人班次、仅拦截时间重叠；跨任务按 multi_shift/cover_multi。
     multi = multi_shift_enabled()
     cover_multi = cover_multi_shift_enabled()
     for b in busy_intervals(conn, person_id, date):

@@ -325,6 +325,9 @@ function defaultFrom() {
   const t = today();
   return t.slice(0, 7) === state.month ? t : state.month + '-01';
 }
+function minFrom() {
+  return state.month === currentMonth() ? today() : state.month + '-01';
+}
 
 function renderSchedule() {
   const tid = state.scheduleTaskId;
@@ -337,8 +340,11 @@ function renderSchedule() {
     '<span class="spacer"></span>' +
     '<label>月份</label><input type="month" id="sch-month" value="' + state.month + '" onchange="state.month=this.value;renderTasks()">' +
     '<label class="chk"><input type="checkbox" id="sch-inc"> 从指定日期开始</label>' +
-    '<input type="date" id="sch-from" value="' + defaultFrom() + '" style="width:132px">' +
+    '<input type="date" id="sch-from" min="' + minFrom() + '" value="' + defaultFrom() + '" style="width:132px">' +
     '<button class="btn primary" onclick="doGenerate()">重新生成排班</button>' +
+    (state.month === currentMonth()
+      ? '<button class="btn" onclick="doGenerateFromToday()" title="以今天为界，仅重排今天及之后（保留之前不变）">从今天起重排</button>'
+      : '') +
     '</div><div id="sched-msg"></div><div class="sched-wrap" id="sched-wrap"><div class="muted" style="padding:14px">加载中…</div></div>';
   loadScheduleGrid();
 }
@@ -402,12 +408,28 @@ function gridHTML(d) {
   });
   return h + '</tbody></table>';
 }
+async function runGenerate(startDate) {
+  const parts = state.month.split('-');
+  const body = { year: Number(parts[0]), month: Number(parts[1]) };
+  if (startDate) body.start_date = startDate;
+  const r = await post('/api/tasks/' + state.scheduleTaskId + '/generate', body);
+  const head = r.incremental
+    ? '已从 ' + startDate + ' 重新生成 ' + r.days + ' 天（保留前 ' + r.kept_days + ' 天不变）'
+    : '已生成 ' + r.days + ' 天';
+  if (r.warnings && r.warnings.length) {
+    state.scheduleMsg = head + '，但以下时段未能排满（人员/权限不足）：\n' + r.warnings.join('\n');
+    toast('已生成，存在未排满岗位', true);
+  } else {
+    state.scheduleMsg = head + '。';
+    toast('排班已生成');
+  }
+  await loadScheduleGrid();
+}
 async function doGenerate() {
   const parts = state.month.split('-');
-  const y = Number(parts[0]), m = Number(parts[1]);
   const incEl = $('#sch-inc'), fromEl = $('#sch-from');
   const inc = !!(incEl && incEl.checked);
-  let from = incEl && fromEl ? fromEl.value : '';
+  const from = (fromEl && fromEl.value) || '';
   if (inc) {
     if (!from || from.slice(0, 7) !== state.month) {
       toast('请选择本月内的「从指定日期开始」日期', true);
@@ -417,23 +439,23 @@ async function doGenerate() {
     if (!confirm('将只重新生成 ' + from + ' 至月末的排班（该月 1 日 ~ ' +
         String(kept).padStart(2, '0') + ' 日的排班保持不变），按当前名单分配这段排班。继续？')) return;
   } else {
-    if (!confirm('将重新生成 ' + y + '年' + m + '月 的排班，该月已有排班会被覆盖，继续？')) return;
+    if (!confirm('将重新生成 ' + Number(parts[0]) + '年' + Number(parts[1]) + '月 的排班，该月已有排班会被覆盖，继续？')) return;
   }
-  const body = { year: y, month: m };
-  if (inc) body.start_date = from;
   try {
-    const r = await post('/api/tasks/' + state.scheduleTaskId + '/generate', body);
-    const head = r.incremental
-      ? '已从 ' + from + ' 重新生成 ' + r.days + ' 天（保留前 ' + r.kept_days + ' 天不变）'
-      : '已生成 ' + r.days + ' 天';
-    if (r.warnings && r.warnings.length) {
-      state.scheduleMsg = head + '，但以下时段未能排满（人员/权限不足）：\n' + r.warnings.join('\n');
-      toast('已生成，存在未排满岗位', true);
-    } else {
-      state.scheduleMsg = head + '。';
-      toast('排班已生成');
-    }
-    await loadScheduleGrid();
+    await runGenerate(inc ? from : null);
+  } catch (e) { toast(e.message, true); }
+}
+async function doGenerateFromToday() {
+  const t = today();
+  if (t.slice(0, 7) !== state.month) {
+    toast('当前查看的不是本月，「从今天起重排」仅对本月可用', true);
+    return;
+  }
+  const kept = Number(t.slice(8, 10)) - 1;
+  if (!confirm('将从今天 ' + t + ' 起重新生成排班（该月 1 日 ~ ' +
+      String(kept).padStart(2, '0') + ' 日的排班保持不变），按当前名单分配这段排班。继续？')) return;
+  try {
+    await runGenerate(t);
   } catch (e) { toast(e.message, true); }
 }
 async function openAssignModal(date, slotId) {

@@ -950,6 +950,39 @@ def scenario_positions_perm_ids_migration():
     check("原 perm_id 为空者回填空数组", rows["岗乙"]["perm_ids"] == "[]", str(rows["岗乙"]))
 
 
+def scenario_att_kind_labels():
+    print("== 考勤类型改真实名（事假/病假）+ 旧库迁移")
+    conn, perms, cats = fresh("attlabels.db")
+    kinds = db.att_kinds_map()
+    check("默认标签为 事假/病假", kinds["a"]["label"] == "事假" and kinds["b"]["label"] == "病假",
+          str({k: v["label"] for k, v in kinds.items()}))
+    check("权重与不在岗不变", kinds["a"]["weight"] == 0.8 and kinds["b"]["weight"] == 0.5
+          and kinds["a"]["unavailable"] and kinds["b"]["unavailable"], "")
+    conn.close()
+
+    import sqlite3
+    path = os.path.join(TMP, "attmig.db")
+    if os.path.exists(path):
+        os.remove(path)
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        "CREATE TABLE att_kinds(kind TEXT PRIMARY KEY, label TEXT NOT NULL, weight REAL NOT NULL DEFAULT 0, "
+        "unavailable INTEGER NOT NULL DEFAULT 0, sort INTEGER NOT NULL DEFAULT 0);"
+        "INSERT INTO att_kinds(kind,label,weight,unavailable,sort) VALUES"
+        "('normal','正常',1,0,0),('a','A事',0.8,1,1),('b','B事',0.5,1,2),('absent','缺勤',0,1,3);"
+    )
+    raw.commit()
+    raw.close()
+    db.DB_PATH = path
+    db._SETTINGS_CACHE = None
+    db._KINDS_CACHE = None
+    db.init_db()
+    conn = db.get_conn()
+    rows = {r["kind"]: r["label"] for r in conn.execute("SELECT kind, label FROM att_kinds")}
+    conn.close()
+    check("旧库 A事/B事 幂等改名为 事假/病假", rows.get("a") == "事假" and rows.get("b") == "病假", str(rows))
+
+
 def main():
     global TMP
     TMP = tempfile.mkdtemp(prefix="workday_selftest_")
@@ -976,6 +1009,7 @@ def main():
         scenario_cover_multi()
         scenario_position_multi_perm()
         scenario_positions_perm_ids_migration()
+        scenario_att_kind_labels()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

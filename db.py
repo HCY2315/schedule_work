@@ -53,8 +53,8 @@ SLOT_DEFAULT_TEMPLATE = [(i * 2, i * 2 + 2) for i in range(12)]
 # 运行期的可编辑配置以数据库 att_kinds 表为准（可在「设置」页增删改），表结构见 init_db。
 DEFAULT_ATT_KINDS = {
     "normal": {"label": "正常", "weight": 1.0, "unavailable": False},
-    "a": {"label": "A事", "weight": 0.8, "unavailable": True},
-    "b": {"label": "B事", "weight": 0.5, "unavailable": True},
+    "a": {"label": "事假", "weight": 0.8, "unavailable": True},
+    "b": {"label": "病假", "weight": 0.5, "unavailable": True},
     "absent": {"label": "缺勤", "weight": 0.0, "unavailable": True},
 }
 
@@ -211,6 +211,14 @@ def _migrate_positions_perm_ids(conn):
             conn.execute("UPDATE positions SET perm_ids=? WHERE id=?", (_dumps([r["perm_id"]]), r["id"]))
 
 
+ATT_KIND_RENAMES = [("A事", "事假"), ("B事", "病假")]
+
+
+def _migrate_att_kind_labels(conn):
+    for old, new in ATT_KIND_RENAMES:
+        conn.execute("UPDATE att_kinds SET label=? WHERE label=?", (new, old))
+
+
 def init_db():
     conn = get_conn()
     # WAL：读写可并发，写锁粒度从库级降为事务级，多人同时保存不易 "database is locked"
@@ -316,6 +324,7 @@ def init_db():
     _migrate_rename_placeholders(conn)
     _migrate_positions_perm_ids(conn)
     _seed(conn)
+    _migrate_att_kind_labels(conn)
     reload_att_kinds(conn)
     conn.commit()
     conn.close()

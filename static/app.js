@@ -865,7 +865,7 @@ function renderSettings() {
     '</tr></thead><tbody id="kinds-body">';
   attKindList().forEach(function (k) { h += kindRowHTML(k, false); });
   h += '</tbody></table>' +
-    '<div class="muted" style="margin-top:10px">分数用于统计加权（正常×1）。「缺勤」通常为 0 分；「A事/B事」按实际折算。</div></div>';
+    '<div class="muted" style="margin-top:10px">分数用于统计加权（正常×1）。「缺勤」通常为 0 分；「事假/病假」按实际折算。</div></div>';
   el.innerHTML = h;
 }
 async function toggleMultiShift(on) {

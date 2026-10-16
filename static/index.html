@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>智能排班系统</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">智能排班系统</div>
+  <nav id="nav">
+    <button data-tab="tasks" class="active">排班任务</button>
+    <button data-tab="roster">人员名单</button>
+    <button data-tab="perms">权限类别</button>
+    <button data-tab="attendance">考勤与顶班</button>
+    <button data-tab="stats">统计</button>
+    <button data-tab="settings">设置</button>
+  </nav>
+</header>
+<main>
+  <section id="tab-tasks" class="tab active"></section>
+  <section id="tab-roster" class="tab"></section>
+  <section id="tab-perms" class="tab"></section>
+  <section id="tab-attendance" class="tab"></section>
+  <section id="tab-stats" class="tab"></section>
+  <section id="tab-settings" class="tab"></section>
+</main>
+<div id="modal-root"></div>
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

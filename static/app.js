@@ -201,19 +201,37 @@ async function deleteTask(id) {
 }
 
 function posLineHTML(i, p, j) {
-  const pset = new Set(p.perm_ids || (p.perm_id != null ? [p.perm_id] : []));
-  let perms = '';
-  state.meta.permissions.forEach(function (pm) {
-    perms += '<label class="ck"><input type="checkbox"' + (pset.has(pm.id) ? ' checked' : '') +
-      ' onchange="setPosPerm(' + i + ',' + j + ',' + pm.id + ',this.checked)">' + esc(pm.name) + '</label>';
-  });
-  if (!state.meta.permissions.length) perms = '<span class="muted">无权限可选</span>';
+  const pset = p.perm_ids || (p.perm_id != null ? [p.perm_id] : []);
+  const tags = pset.length
+    ? pset.map(function (id) { return '<span class="tag">' + esc(permName(id)) + '</span>'; }).join('')
+    : '<span class="muted">不限</span>';
   return '<div class="pos-line">' +
     '<span class="muted" style="width:52px">岗位' + (j + 1) + '</span>' +
     '<input type="text" class="pname" placeholder="岗位名称" value="' + esc(p.name) + '" onchange="setPos(' + i + ',' + j + ',\'name\',this.value)">' +
-    '<span class="muted pos-perm-label">需权限（需全部满足）：</span><span class="pos-perms">' + perms + '</span>' +
+    '<span class="muted">需权限：</span><span class="pos-perm-tags">' + tags + '</span>' +
+    '<button class="btn small" onclick="openPosPermPicker(' + i + ',' + j + ')">+ 权限</button>' +
     '<button class="btn small danger" onclick="delPos(' + i + ',' + j + ')">删岗位</button>' +
     '</div>';
+}
+function openPosPermPicker(i, j) {
+  const pos = state.editTask.slots[i].positions[j];
+  const cur = new Set(pos.perm_ids || (pos.perm_id != null ? [pos.perm_id] : []));
+  let h = '<div class="muted" style="margin-bottom:8px">勾选该岗位需要的权限（人员需<b>全部满足</b>才能胜任）：</div><div class="perm-box">';
+  state.meta.permissions.forEach(function (pm) {
+    h += '<label class="ck"><input type="checkbox" value="' + pm.id + '"' + (cur.has(pm.id) ? ' checked' : '') + '>' + esc(pm.name) + '</label>';
+  });
+  if (!state.meta.permissions.length) h += '<span class="muted">还没有权限，请先到「权限类别」添加</span>';
+  h += '</div><div class="m-foot"><button class="btn" onclick="closeModal()">取消</button>' +
+    '<button class="btn primary" onclick="applyPosPerms(' + i + ',' + j + ')">确定</button></div>';
+  openModal('岗位「' + pos.name + '」所需权限', h);
+}
+function applyPosPerms(i, j) {
+  const pos = state.editTask.slots[i].positions[j];
+  const ids = Array.from(document.querySelectorAll('#modal-root .perm-box input:checked')).map(function (cb) { return Number(cb.value); });
+  pos.perm_ids = ids.sort(function (a, b) { return a - b; });
+  pos.perm_id = pos.perm_ids.length ? pos.perm_ids[0] : null;
+  closeModal();
+  renderTasks();
 }
 function slotRowHTML(s, i) {
   let h = '<div class="slot-editor"><div class="s-head">' +
@@ -265,13 +283,6 @@ function restoreDefaultSlots() {
 }
 function setSlot(i, field, v) { state.editTask.slots[i][field] = v.trim(); }
 function setPos(i, j, field, v) { state.editTask.slots[i].positions[j][field] = v; }
-function setPosPerm(i, j, pmId, checked) {
-  const pos = state.editTask.slots[i].positions[j];
-  const set = new Set(pos.perm_ids || (pos.perm_id != null ? [pos.perm_id] : []));
-  if (checked) set.add(pmId); else set.delete(pmId);
-  pos.perm_ids = Array.from(set).sort(function (a, b) { return a - b; });
-  pos.perm_id = pos.perm_ids.length ? pos.perm_ids[0] : null;
-}
 function setPosCount(i, n) {
   const s = state.editTask.slots[i];
   while (s.positions.length > n) s.positions.pop();

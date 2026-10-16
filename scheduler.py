@@ -529,3 +529,37 @@ def remove_cover(conn, task_id, date, position_id, base_person_id):
         (task_id, date, position_id, base_person_id),
     )
     conn.commit()
+
+
+def repair_orphan_covers(conn):
+    """修复「顶班记录的 cover_of 找不到对应底班」的孤立行。
+
+    cover_of 存的是被顶人的 person_id。孤立顶班（同任务/日/岗位下没有该被顶人的底班）：
+    若该岗位当天已有其它底班 → 删除这条冗余顶班；否则 → 把该顶班行升为底班（cover_of=NULL）。
+    返回 (删除数, 升级为底班数)。
+    """
+    removed = promoted = 0
+    rows = conn.execute(
+        "SELECT id, task_id, date, position_id, person_id, cover_of "
+        "FROM schedules WHERE cover_of IS NOT NULL"
+    ).fetchall()
+    for r in rows:
+        base = conn.execute(
+            "SELECT 1 FROM schedules WHERE task_id=? AND date=? AND position_id=? "
+            "AND person_id=? AND cover_of IS NULL",
+            (r["task_id"], r["date"], r["position_id"], r["cover_of"]),
+        ).fetchone()
+        if base:
+            continue
+        other = conn.execute(
+            "SELECT 1 FROM schedules WHERE task_id=? AND date=? AND position_id=? AND cover_of IS NULL",
+            (r["task_id"], r["date"], r["position_id"]),
+        ).fetchone()
+        if other:
+            conn.execute("DELETE FROM schedules WHERE id=?", (r["id"],))
+            removed += 1
+        else:
+            conn.execute("UPDATE schedules SET cover_of=NULL WHERE id=?", (r["id"],))
+            promoted += 1
+    conn.commit()
+    return removed, promoted

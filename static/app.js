@@ -827,7 +827,8 @@ function renderSettings() {
     '<div class="muted" style="margin-top:6px">停用（软删除）不会删除历史排班与考勤记录，可在人员页随时恢复。</div></div>';
   h += '<div class="card"><h3>数据自检</h3>' +
     '<div class="muted">检查孤立引用、同日冲突、时段重叠、重复底班、悬空顶班、失效权限与考勤类型等。</div>' +
-    '<div style="margin-top:8px"><button class="btn" onclick="runSelfcheck()">开始自检</button></div></div>' +
+    '<div style="margin-top:8px"><button class="btn" onclick="runSelfcheck()">开始自检</button> ' +
+    '<button class="btn" onclick="repairCovers()">一键修复悬空顶班</button></div></div>' +
     '<div id="selfcheck-result"></div>';
   h += '<div class="toolbar"><h3>考勤类型设置</h3>' +
     '<span class="muted">修改名称与分数后保存即生效（无需重启）。「不在岗」类型当天不参与排班。</span>' +
@@ -864,6 +865,16 @@ async function toggleShowDisabledSetting(on) {
     toast(e.message, true);
     renderSettings();
   }
+}
+async function repairCovers() {
+  if (!confirm('将修复「顶班记录指向不存在的底班」：\n' +
+    '· 该岗位当天已有其它底班 → 删除这条冗余顶班；\n' +
+    '· 否则 → 把该顶班升为正常排班。\n继续？')) return;
+  try {
+    const r = await post('/api/selfcheck/repair', {});
+    toast('已修复：删除 ' + (r.removed || 0) + ' 条，转为底班 ' + (r.promoted || 0) + ' 条');
+    await runSelfcheck();
+  } catch (e) { toast(e.message, true); }
 }
 async function runSelfcheck() {
   const box = $('#selfcheck-result');

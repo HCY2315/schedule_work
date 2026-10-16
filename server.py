@@ -865,6 +865,15 @@ def put_settings(body):
     return _ok(dict(db.settings_map()))
 
 
+def repair_covers():
+    conn = get_conn()
+    try:
+        removed, promoted = sc.repair_orphan_covers(conn)
+        return _ok({"removed": removed, "promoted": promoted})
+    finally:
+        conn.close()
+
+
 def selfcheck():
     conn = get_conn()
     try:
@@ -943,9 +952,24 @@ def selfcheck():
         add("同一岗位同一天存在多条底班", dup_base)
 
         dangling = []
-        for r in conn.execute("SELECT id, cover_of FROM schedules WHERE cover_of IS NOT NULL"):
-            if conn.execute("SELECT 1 FROM schedules WHERE id=?", (r["cover_of"],)).fetchone() is None:
-                dangling.append({"schedules.id": r["id"], "原因": "cover_of=%s 指向不存在的行" % r["cover_of"]})
+        for r in conn.execute(
+            "SELECT id, task_id, date, position_id, person_id, cover_of "
+            "FROM schedules WHERE cover_of IS NOT NULL"
+        ):
+            base = conn.execute(
+                "SELECT 1 FROM schedules WHERE task_id=? AND date=? AND position_id=? "
+                "AND person_id=? AND cover_of IS NULL",
+                (r["task_id"], r["date"], r["position_id"], r["cover_of"]),
+            ).fetchone()
+            if base is None:
+                dangling.append({
+                    "schedules.id": r["id"],
+                    "日期": r["date"],
+                    "岗位id": r["position_id"],
+                    "顶班人id": r["person_id"],
+                    "被顶人id(cover_of)": r["cover_of"],
+                    "原因": "同任务/日/岗位下找不到被顶人 %s 的底班" % r["cover_of"],
+                })
         add("顶班记录指向不存在的底班", dangling)
 
         bad_kind = []
@@ -1323,6 +1347,8 @@ def dispatch(method, path, qs, body):
                 return put_settings(body)
         if path == "/api/selfcheck" and method == "GET":
             return selfcheck()
+        if path == "/api/selfcheck/repair" and method == "POST":
+            return repair_covers()
         if path == "/api/permissions":
             if method == "GET":
                 return get_permissions()

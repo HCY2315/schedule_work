@@ -142,6 +142,8 @@
 - 「设置」页提供「数据自检」按钮，调用 `GET /api/selfcheck`。
 - 检查项：孤立引用（记录指向已删除对象）、跨任务同日冲突（**仅当多班次关闭时**计入问题）、时间区间重叠、同一岗位同日多条底班、顶班指向不存在的底班、非法考勤类型、权限引用失效。
 - 返回 `{ok, issues, settings, checks, counts}`；开启多班次后，正常的跨任务同日排班降级为信息项，不再计入 `issues`。
+- 「**一键修复悬空顶班**」按钮调用 `POST /api/selfcheck/repair`：对「`cover_of` 找不到底班」的孤立顶班行，若该岗位当天已有其它底班则删除，否则**升为底班**。
+- 约定：`cover_of` 存的是**被顶人的 `person_id`**（不是排班行 id）。
 
 ### 1.4 业务规则与约束（不变量）
 
@@ -213,6 +215,7 @@ REST，JSON 收发。基址 `http://127.0.0.1:8686`。
 | GET/POST/PUT | `/api/att_kinds` | 读取/保存考勤类型配置 |
 | GET/POST/PUT | `/api/settings` | 读取/保存全局设置（`multi_shift`、`show_disabled`；未知键报错） |
 | GET | `/api/selfcheck` | 数据一致性自检（返回 `ok/issues/checks/counts`） |
+| POST | `/api/selfcheck/repair` | 一键修复悬空顶班（`cover_of` 找不到底班的孤立顶班行） |
 | GET/POST | `/api/permissions` | 列出 / 新增权限 |
 | PUT/DELETE | `/api/permissions/{id}` | 重命名 / 删除权限（级联清理） |
 | GET | `/api/categories` | 列出类别 |
@@ -285,11 +288,11 @@ python3 dist/排班系统.pyz      # 运行（数据文件在 dist/data.db）
 python3 selftest.py            # 后端自测（业务规则/配置/分组/顶班/多班次/自检）
 ```
 
-- `selftest.py`：**108 项断言**，覆盖公平性（含**时段均衡**与**缺人轮换空岗**）、配置化、按排班表分组统计、顶班覆盖、多班次开关、数据自检、**人员软删除/恢复**、**增量重排**、**老库自动迁移**、**生成的时间重叠校验**、**统计按月查询**等场景。
+- `selftest.py`：**114 项断言**，覆盖公平性（含**时段均衡**与**缺人轮换空岗**）、配置化、按排班表分组统计、顶班覆盖、多班次开关、数据自检、**人员软删除/恢复**、**增量重排**、**老库自动迁移**、**生成的时间重叠校验**、**统计按月查询**、**顶班自检/修复**等场景。
 - 前端 E2E（可选，需 playwright-core + chromium）：
   ```bash
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/e2e.js       # 全流程回归（34 项）
-  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat.js   # 设置页开关 + 自检 + 统计折叠（19 项）
+  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat.js   # 设置页开关 + 自检 + 修复按钮 + 统计折叠（20 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat2.js  # 人员停用/恢复 + 增量重排（16 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat3.js  # 新增人员默认值 + 排班表纵向布局（11 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat5.js  # 统计按月查询 + 全部月份=年（11 项）

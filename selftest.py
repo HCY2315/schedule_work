@@ -803,6 +803,50 @@ def scenario_fairness_slots():
     conn2.close()
 
 
+def scenario_cover_selfcheck():
+    print("== 顶班自检：正常顶班不误报；悬空顶班可检出并修复")
+    conn, perms, cats = fresh("coversc.db")
+    db.set_setting("multi_shift", "0")
+    rid = make_roster(conn, perms, cats, 4)
+    tid = make_task(perms, rid, 2)
+    sc.generate_month(tid, 2026, 10)
+
+    def count_of(name):
+        st, res = server.selfcheck()
+        for c in res["checks"]:
+            if c["name"] == name:
+                return c["count"]
+        return -1
+
+    base = conn.execute(
+        "SELECT * FROM schedules WHERE task_id=? AND date='2026-10-10' AND cover_of IS NULL ORDER BY id LIMIT 1",
+        (tid,)).fetchone()
+    base_pid, pos_id = base["person_id"], base["position_id"]
+    cover_pid = conn.execute(
+        "SELECT id FROM persons WHERE roster_id=? AND id<>? ORDER BY id LIMIT 1", (rid, base_pid)).fetchone()["id"]
+    st, d = server.cover_apply({"task_id": tid, "date": "2026-10-10", "position_id": pos_id, "person_id": cover_pid})
+    check("应用顶班成功", st == 200, str(d))
+    check("正常顶班不被误报为悬空", count_of("顶班记录指向不存在的底班") == 0, "")
+
+    slot_id = conn.execute(
+        "SELECT id FROM slots WHERE task_id=? ORDER BY idx DESC LIMIT 1", (tid,)).fetchone()["id"]
+    free_pos = conn.execute("SELECT id FROM positions WHERE slot_id=?", (slot_id,)).fetchone()["id"]
+    conn.execute("DELETE FROM schedules WHERE task_id=? AND date='2026-10-11' AND position_id=?", (tid, free_pos))
+    conn.execute(
+        "INSERT INTO schedules(task_id, date, slot_id, position_id, person_id, cover_of) VALUES(?,?,?,?,?,?)",
+        (tid, "2026-10-11", slot_id, free_pos, cover_pid, 999999))
+    conn.commit()
+    check("悬空顶班被检出", count_of("顶班记录指向不存在的底班") >= 1, "")
+    st, d = server.repair_covers()
+    check("修复接口成功", st == 200, str(d))
+    row = conn.execute(
+        "SELECT cover_of FROM schedules WHERE task_id=? AND date='2026-10-11' AND person_id=?",
+        (tid, cover_pid)).fetchone()
+    check("无底班场景：悬空顶班升为底班", row is not None and row["cover_of"] is None, str(dict(row) if row else None))
+    check("修复后自检清零", count_of("顶班记录指向不存在的底班") == 0, "")
+    conn.close()
+
+
 def main():
     global TMP
     TMP = tempfile.mkdtemp(prefix="workday_selftest_")
@@ -825,6 +869,7 @@ def main():
         scenario_overlap_validation()
         scenario_stats_month()
         scenario_fairness_slots()
+        scenario_cover_selfcheck()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

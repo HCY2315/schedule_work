@@ -762,6 +762,47 @@ def scenario_stats_month():
     conn.close()
 
 
+def scenario_fairness_slots():
+    print("== 时段均衡 + 缺人轮换空岗")
+
+    def build(name, npeople, nslots):
+        conn, perms, cats = fresh(name)
+        allp = db._dumps(sorted(perms.values()))
+        rid = conn.execute("INSERT INTO rosters(name) VALUES(?)", (name,)).lastrowid
+        for i in range(npeople):
+            conn.execute("INSERT INTO persons(roster_id,name,code,perm_ids) VALUES(?,?,?,?)",
+                         (rid, "P%02d" % (i + 1), "E%03d" % (i + 1), allp))
+        tid = conn.execute("INSERT INTO tasks(name,roster_id) VALUES(?,?)", (name, rid)).lastrowid
+        for s in range(nslots):
+            sid = conn.execute('INSERT INTO slots(task_id,idx,start,"end") VALUES(?,?,?,?)',
+                               (tid, s, "%02d:00" % s, "%02d:00" % (s + 1))).lastrowid
+            conn.execute("INSERT INTO positions(slot_id,name,perm_id) VALUES(?,'岗',NULL)", (sid,))
+        conn.commit()
+        return conn, tid
+
+    conn, tid = build("slotbal.db", 10, 3)
+    sc.generate_month(tid, 2026, 10)
+    slots = [s["id"] for s in conn.execute("SELECT id FROM slots WHERE task_id=? ORDER BY idx", (tid,))]
+    per = {}
+    for r in conn.execute("SELECT person_id, slot_id FROM schedules WHERE task_id=?", (tid,)):
+        per.setdefault(r["person_id"], {}).setdefault(r["slot_id"], 0)
+        per[r["person_id"]][r["slot_id"]] += 1
+    zeros = sum(1 for d in per.values() for s in slots if d.get(s, 0) == 0)
+    spread = max(max(d.get(s, 0) for s in slots) - min(d.get(s, 0) for s in slots) for d in per.values())
+    check("同权限: 无人整月缺失某时段(0班)", zeros == 0, "zeros=%d" % zeros)
+    check("同权限: 每人各时段分布极差<=1", spread <= 1, "spread=%d" % spread)
+    conn.close()
+
+    conn2, tid2 = build("slotrot.db", 4, 6)
+    sc.generate_month(tid2, 2026, 10)
+    slots2 = [s["id"] for s in conn2.execute("SELECT id FROM slots WHERE task_id=? ORDER BY idx", (tid2,))]
+    fill = {s: 0 for s in slots2}
+    for r in conn2.execute("SELECT slot_id FROM schedules WHERE task_id=?", (tid2,)):
+        fill[r["slot_id"]] += 1
+    check("缺人: 6个时段都有班(轮换空岗，不再恒空尾部)", all(v > 0 for v in fill.values()), str([fill[s] for s in slots2]))
+    conn2.close()
+
+
 def main():
     global TMP
     TMP = tempfile.mkdtemp(prefix="workday_selftest_")
@@ -783,6 +824,7 @@ def main():
         scenario_rename_migration()
         scenario_overlap_validation()
         scenario_stats_month()
+        scenario_fairness_slots()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

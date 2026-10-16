@@ -227,23 +227,6 @@ def person_total(score_map, pid):
 # ---------------------------------------------------------------- 排班生成
 
 
-def _earlier_slot(slot_id, slot_ids):
-    i = slot_ids.index(slot_id)
-    return slot_ids[(i - 1) % len(slot_ids)]
-
-
-def _prev_assignments(conn, task_id, date):
-    rows = conn.execute(
-        "SELECT person_id, slot_id FROM schedules "
-        "WHERE task_id=? AND date<? ORDER BY date, id",
-        (task_id, date),
-    ).fetchall()
-    prev = {}
-    for r in rows:
-        prev[r["person_id"]] = r["slot_id"]
-    return prev
-
-
 def _yesterday_slots(conn, task_id, date):
     yd = (_fromiso(date) - datetime.timedelta(days=1)).isoformat()
     rows = conn.execute(
@@ -307,17 +290,17 @@ def generate_month(task_id, year, month, start_date=None):
 
         slot_ids = [s["id"] for s in task["slots"]]
         gen_count = Counter()
-        if incremental:
-            for r in conn.execute(
-                "SELECT person_id, COUNT(*) c FROM schedules "
-                "WHERE task_id=? AND date>=? AND date<? GROUP BY person_id",
-                (task_id, start.isoformat(), keep_from),
-            ):
-                gen_count[r["person_id"]] = r["c"]
+        slot_count = Counter()
+        for r in conn.execute(
+            "SELECT person_id, slot_id FROM schedules WHERE task_id=? AND date>=? AND date<?",
+            (task_id, start.isoformat(), keep_from),
+        ):
+            gen_count[r["person_id"]] += 1
+            slot_count[(r["person_id"], r["slot_id"])] += 1
 
         warnings = []
         for date in dates:
-            warnings += _generate_day(conn, task, roster, date, slot_ids, gen_count)
+            warnings += _generate_day(conn, task, roster, date, slot_ids, gen_count, slot_count)
         conn.commit()
         return {
             "days": len(dates),
@@ -335,33 +318,27 @@ def _days_between(start_iso, keep_from_iso):
     return (b - a).days
 
 
-def _generate_day(conn, task, roster, date, slot_ids, gen_count):
+def _generate_day(conn, task, roster, date, slot_ids, gen_count, slot_count):
     """当日贪心排班。
 
-    与旧实现的关键区别：候选集是"全体可用人员"，而不是"以往排过班的人"。
+    候选集是"全体可用人员"（不是"以往排过班的人"）。
     候选排序键（越小越优先）：
-        本月已排次数 → 偏好匹配 → 轮动目标 → 年度总分 → 人员ID
-    本月已排次数做主键保证同月内人人均分（不再出现某人整月 0 班）；
-    年度总分做次键保证跨月公平。岗位按"可选人数"从少到多处理，
-    优先满足权限受限的岗位，避免被普通岗位抢占唯一合格人选。
+        本月已排次数 → 本时段已排次数 → 偏好匹配 → 年度总分 → 人员ID
+    本月已排次数做主键保证同月内人人均分；本时段已排次数做次键，
+    保证同一人在各时段间也尽量均分（避免某人总上夜班、某人从不上早班）；
+    年度总分保证跨月公平。岗位按"可选人数"从少到多处理，优先满足权限受限岗位；
+    相同可选人数时按日期轮换时段优先序，使缺人时"空档时段"逐日轮换而非恒空尾部。
     """
     slots = task["slots"]
     slot_by_id = {s["id"]: s for s in slots}
     warnings = []
 
-    prev = _prev_assignments(conn, task["id"], date)
     yslots = _yesterday_slots(conn, task["id"], date)
     scores = year_scores(conn)
     multi = multi_shift_enabled()
     day_busy = load_day_busy(conn, date)
     available = [p for p in roster if not _unavailable(conn, p["id"], date)]
     assigned = set()
-
-    def rotation_rank(pid, sid):
-        last = prev.get(pid)
-        if last is None or last not in slot_ids or last == sid:
-            return 1
-        return 0 if _earlier_slot(last, slot_ids) == sid else 2
 
     def eligible(p, sid, pos):
         pid = p["id"]
@@ -380,18 +357,22 @@ def _generate_day(conn, task, roster, date, slot_ids, gen_count):
         match = 0 if (p.get("preferred_perm_id") and p["preferred_perm_id"] == pos.get("perm_id")) else 1
         return (
             gen_count[p["id"]],
+            slot_count.get((p["id"], sid), 0),
             match,
-            rotation_rank(p["id"], sid),
             person_total(scores, p["id"]),
             p["id"],
         )
 
+    day_idx = _fromiso(date).toordinal()
+    ns = len(slot_ids) or 1
+    slot_prio = {sid: (i - day_idx) % ns for i, sid in enumerate(slot_ids)}
+
     jobs = []
     for sid in slot_ids:
         for pos in slot_by_id[sid]["positions"]:
-            n = sum(1 for p in available if eligible(p, sid, pos))
+            n = sum(1 for p in available if _perm_ok(p, pos))
             jobs.append((n, sid, pos))
-    jobs.sort(key=lambda x: x[0])
+    jobs.sort(key=lambda x: (x[0], slot_prio[x[1]], x[1]))
 
     for _, sid, pos in jobs:
         cands = sorted((p for p in available if eligible(p, sid, pos)), key=lambda p: key(p, sid, pos))
@@ -404,6 +385,7 @@ def _generate_day(conn, task, roster, date, slot_ids, gen_count):
         p = cands[0]
         assigned.add(p["id"])
         gen_count[p["id"]] += 1
+        slot_count[(p["id"], sid)] += 1
         _insert(conn, task["id"], date, sid, pos["id"], p["id"], None)
         day_busy.setdefault(p["id"], []).append(
             (slot_by_id[sid]["start"], slot_by_id[sid]["end"], task["id"], pos["id"])

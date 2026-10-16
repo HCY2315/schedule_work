@@ -152,10 +152,11 @@
 3. **不在岗不排班**：考勤类型 `unavailable=1` 的人员当天不参与排班。
 4. **同任务不连续两天同一班次**：昨天上过的班次，今天不排（自动排班为硬约束；顶班时放宽为软偏好）。
 5. **公平性**：候选排序键（越小越优先）：
-   `本月已排次数 → 偏好匹配 → 轮动目标 → 年度总分 → 人员ID`
+   `本月已排次数 → 本时段已排次数 → 偏好匹配 → 年度总分 → 人员ID`
    - 本月已排次数为主键，保证同月内人人均分；
-   - 年度总分（按权重累计）为次键，保证跨月/跨年公平；
-   - 岗位按「可选人数从少到多」处理，优先满足权限受限岗位，避免被普通岗位抢占唯一合格人选。
+   - 本时段已排次数为次键，保证同一人在**各时段间**也尽量均分（避免某人总上夜班 / 从不上早班）；
+   - 年度总分（按权重累计）为后续键，保证跨月/跨年公平；
+   - 岗位按**权限可选人数**从少到多处理，优先满足权限受限岗位；相同可选人数时按日期**轮换时段优先序**，使人手不足时「空档时段」逐日轮换、所有时段长期都有覆盖。
 6. **年度分数**：按考勤类型权重累计，权重可由「设置」页配置（默认：正常 1.0 / A事 0.8 / B事 0.5 / 缺勤 0）。
 
 ### 1.5 非功能需求
@@ -284,7 +285,7 @@ python3 dist/排班系统.pyz      # 运行（数据文件在 dist/data.db）
 python3 selftest.py            # 后端自测（业务规则/配置/分组/顶班/多班次/自检）
 ```
 
-- `selftest.py`：**105 项断言**，覆盖公平性、配置化、按排班表分组统计、顶班覆盖、多班次开关、数据自检、**人员软删除/恢复**、**增量重排**、**老库自动迁移**、**生成的时间重叠校验**、**统计按月查询**等场景。
+- `selftest.py`：**108 项断言**，覆盖公平性（含**时段均衡**与**缺人轮换空岗**）、配置化、按排班表分组统计、顶班覆盖、多班次开关、数据自检、**人员软删除/恢复**、**增量重排**、**老库自动迁移**、**生成的时间重叠校验**、**统计按月查询**等场景。
 - 前端 E2E（可选，需 playwright-core + chromium）：
   ```bash
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/e2e.js       # 全流程回归（34 项）
@@ -444,45 +445,40 @@ work_day/
 1. 概览
 - 入口：generate_month(task_id, year, month)（覆盖该月该任务的排班，先 DELETE 再重排）
 - 每天：_generate_day(...) 执行贪心分配
-- 公平性依赖：gen_count（本月已排次数）、year_scores（年度累计权重）、rotation_rank（轮动目标）、偏好匹配（preferred_perm_id==position.perm_id）、岗位“最少可选人数”优先
+- 公平性依赖：gen_count（本月已排次数）、slot_count（每人各时段已排次数）、year_scores（年度累计权重）、偏好匹配（preferred_perm_id==position.perm_id）、岗位“权限可选人数”优先
 
 2. 核心数据准备（每天）
-- prev = _prev_assignments(task,date) → 最近一次安排的 slot_id（用于轮动）
 - yslots = _yesterday_slots(task,date-1) → 昨天同任务各人的班次（用于“不得连续两天同班次”硬约束）
 - scores = year_scores(year) → 每人年度各考勤类型计数和 total（权重累计）
 - busy_today = 当天全库已有排班的 person_id（跨任务“每人每天最多一班”）
 - available = 名单中非不在岗（attendance.kind 在 att_kinds 中 unavailable=True 则不排）
 - assigned = 当天本任务已分配的 person_id
+- gen_count / slot_count 由保留段预填（整月重排=0；增量重排=start_date 之前的已排）
 
-3. 轮动逻辑 rotation_rank(pid, sid)
-- last = prev[pid]（本任务历史最近一次 slot_id）
-- 若从未排或 last 不在 slot 列表或 last == sid → 1（中性）
-- 否则：若 _earlier_slot(last, slot_ids) == sid → 0（倾向回到“前一个”班次？实现上返回 0 表示更优先）
-- 否则 → 2（更差）
-- 目标：鼓励“轮动”切换班次，减少连续扎堆同一班次倾向
-
-_earlier_slot：在 slot_ids 顺序中，取上一个（环形），用于判断“轮动方向”。
+3. 时段均衡（替代旧的 rotation_rank）
+- 次键用 slot_count[(pid, sid)]：优先把该人排到“他做得最少”的时段
+- 目标：同一人在各时段间尽量均分（避免某人总上夜班、有人从不上早班）
 
 4. 合格条件 eligible(p, sid, pos)
-- 已分配 or 今天全库已有排班 → False（同任务已分配；busy_today 跨任务拦截）
 - 权限不符：_perm_ok → 岗位 perm_id 为空放行，否则人员 perm_ids 必须包含
-- 连续两天同班次：yslots.get(pid) != sid → 昨天上过同一 slot 则 False（硬约束，自动排班生效；顶班放宽）
+- 同任务一人一天一岗：pid in assigned 或 昨天同班次 yslots.get(pid)==sid → False
+- 多班次开启：跨任务仅“时间重叠”才拦截；关闭：当天全库已有排班即拦截
 
 5. 候选排序键 key(p, sid, pos)（tuple，越小越优先）
 - gen_count[p.id]（本月已排次数）→ 主键：人人均分
-- match：preferred_perm_id==position.perm_id ? 0 : 1（首选权限匹配优先）
-- rotation_rank(p.id, sid)（0/1/2）→ 轮动倾向
+- slot_count[(p.id, sid)]（本时段已排次数）→ 次键：时段均衡
+- match：preferred_perm_id==position.perm_id ? 0 : 1（首选权限匹配）
 - person_total(scores, p.id)（年度总分）→ 跨月公平
 - p.id（稳定破平）
 
-6. “最少可选人数”优先（关键：先难后易）
-- jobs = [(n, sid, pos) for each (slot, position)]，其中 n = sum(1 for p in available if eligible(p,sid,pos))（当前可用集下该岗位的合格人数）
-- jobs.sort(key=lambda x: x[0]) → 可选人数最少的岗位最先分配
-- 用意：优先满足“稀缺权限/极少人能上”的岗位，避免后面再无合格人选
+6. 岗位处理顺序（“先难后易” + 缺人轮换）
+- jobs = [(n, sid, pos)]，n = sum(1 for p in available if _perm_ok(p,pos))（**按权限**的稀缺度）
+- jobs.sort(key=(n, slot_prio[sid], sid))：权限可选人数最少的最先分配；相同则按“随日期轮换”的时段优先序 slot_prio
+- 用意：① 优先满足“稀缺权限”岗位，避免被普通岗位抢占唯一合格人选；② 人手不足时“空档时段”逐日轮换，所有时段长期都有覆盖
 
 7. 单岗位分配
 - cands = sorted(eligible, key=key) → 取 cands[0] 分配
-- assigned.add(pid)、gen_count[pid]+=1、写入 schedules（cover_of=None）
+- assigned.add(pid)、gen_count[pid]+=1、slot_count[(pid,sid)]+=1、写入 schedules（cover_of=None）
 - 若 cands 为空 → 记录 warning（“XX XX:XX-XX 岗位「Y」无人可排”）
 
 8. 顶班（简述）
@@ -490,8 +486,8 @@ _earlier_slot：在 slot_ids 顺序中，取上一个（环形），用于判断
 - apply_cover：找到岗位原排班（cover_of IS NULL），校验不在岗/权限/跨任务拦截（跨任务若已有排班报错），同任务内允许当天已排人员 → 删除该人当日同任务排班再插入新顶班行（cover_of=base_pid）
 
 9. 公平性要点
-- 本月均分（gen_count 主键） + 年度权重均衡（year_scores total）双保险
-- 候选集是“全体可用人员”（不是“曾经排过的人”）—— 注释中也提到这点
-- 岗位按“可选人数”升序（先难后易）减少“卡死”风险
+- 本月均分（gen_count 主键）+ 时段均衡（slot_count 次键）+ 年度权重均衡（year_scores total）
+- 候选集是“全体可用人员”（不是“曾经排过的人”）
+- 岗位按“权限可选人数”升序（先难后易）+ 同稀缺度按日期轮换，减少“卡死”与“固定空岗”
 
-核心一句话：逐日、按岗位“稀缺度”排序、再按多维公平键选人，强约束（权限、不在岗、每天一班、连续两天同班次）优先，软偏好（首选权限、轮动）其次。
+核心一句话：逐日、按岗位“权限稀缺度”排序（同稀缺度按日期轮换时段优先序）、再按多维公平键（本月次数→本时段次数→偏好→年度分→id）选人；强约束（权限、不在岗、同任务一人一天一岗、连续两天同班次）优先，软偏好（首选权限、时段均衡）其次。

@@ -51,6 +51,18 @@ def load_person(conn, pid):
 def load_roster(conn, roster_id):
     out = []
     for r in conn.execute(
+        "SELECT * FROM persons WHERE roster_id=? AND status='active' ORDER BY id",
+        (roster_id,),
+    ):
+        d = dict(r)
+        d["perm_ids"] = json.loads(d["perm_ids"] or "[]")
+        out.append(d)
+    return out
+
+
+def load_roster_all(conn, roster_id):
+    out = []
+    for r in conn.execute(
         "SELECT * FROM persons WHERE roster_id=? ORDER BY id", (roster_id,)
     ):
         d = dict(r)
@@ -252,7 +264,7 @@ def _unavailable(conn, person_id, date):
     return is_absent(attendance_kind(conn, person_id, date))
 
 
-def generate_month(task_id, year, month):
+def generate_month(task_id, year, month, start_date=None):
     conn = get_conn()
     try:
         task = load_task(conn, task_id)
@@ -269,26 +281,58 @@ def generate_month(task_id, year, month):
             end = datetime.date(year + 1, 1, 1)
         else:
             end = datetime.date(year, month + 1, 1)
+
+        keep_from = start.isoformat()
+        incremental = False
+        if start_date:
+            try:
+                from_date = datetime.date.fromisoformat(str(start_date))
+            except ValueError:
+                raise ValueError("start_date 格式应为 YYYY-MM-DD")
+            if not (start <= from_date < end):
+                raise ValueError("start_date 必须在该月内")
+            keep_from = from_date.isoformat()
+            incremental = keep_from > start.isoformat()
+
         dates = []
-        cur = start
+        cur = datetime.date.fromisoformat(keep_from)
         while cur < end:
             dates.append(cur.isoformat())
             cur += datetime.timedelta(days=1)
 
         conn.execute(
             "DELETE FROM schedules WHERE task_id=? AND date>=? AND date<?",
-            (task_id, dates[0], dates[-1] + "zz"),
+            (task_id, dates[0], end.isoformat()),
         )
 
         slot_ids = [s["id"] for s in task["slots"]]
         gen_count = Counter()
+        if incremental:
+            for r in conn.execute(
+                "SELECT person_id, COUNT(*) c FROM schedules "
+                "WHERE task_id=? AND date>=? AND date<? GROUP BY person_id",
+                (task_id, start.isoformat(), keep_from),
+            ):
+                gen_count[r["person_id"]] = r["c"]
+
         warnings = []
         for date in dates:
             warnings += _generate_day(conn, task, roster, date, slot_ids, gen_count)
         conn.commit()
-        return {"days": len(dates), "warnings": warnings[:50]}
+        return {
+            "days": len(dates),
+            "warnings": warnings[:50],
+            "incremental": incremental,
+            "kept_days": 0 if not incremental else _days_between(start.isoformat(), keep_from),
+        }
     finally:
         conn.close()
+
+
+def _days_between(start_iso, keep_from_iso):
+    a = datetime.date.fromisoformat(start_iso)
+    b = datetime.date.fromisoformat(keep_from_iso)
+    return (b - a).days
 
 
 def _generate_day(conn, task, roster, date, slot_ids, gen_count):
@@ -470,6 +514,8 @@ def apply_cover(conn, task_id, date, position_id, person_id):
     p = load_person(conn, person_id)
     if p is None:
         raise ValueError("人员不存在")
+    if p.get("status") == "disabled":
+        raise ValueError("该人员已停用，请先恢复后再排班")
     pos = dict(conn.execute("SELECT * FROM positions WHERE id=?", (position_id,)).fetchone())
     if not _perm_ok(p, pos):
         raise ValueError("该人员没有此岗位所需权限")

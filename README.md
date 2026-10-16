@@ -69,6 +69,8 @@
 - 在名单下新建/编辑/删除人员，字段：姓名、工号、电话、备注、**权限集合**、**首选权限**、**类别**。
 - 选择「类别」时可一键套用该类别默认权限与首选权限；也可逐项自定义。
 - 人员的权限决定其可被排到哪些岗位。
+- **删除采用软删除（停用）**：仅将人员置为 `status='disabled'` 并记录 `deleted_at`，**不删除**其历史排班与考勤记录；停用者不再出现在排班候选（`load_roster`）中，可随时**恢复**。
+- 人员页提供「显示已停用」开关（持久化于设置 `show_disabled`），可查看并恢复停用人员；列表对停用者标灰并显示「已停用」标签。
 
 #### FR-3 权限管理
 - 新增/重命名/删除权限（默认 A~E）。
@@ -87,8 +89,9 @@
 
 #### FR-6 自动排班
 - 按月生成：`生成(year, month)`，覆盖该月该任务的排班。
+- **增量重排（可选）**：`生成(year, month, start_date)`，当 `start_date` 落在该月内时，**只重排 `start_date` 至月末**的排班，`start_date` 之前的排班**原样保留**；已排段会作为公平性基准（每人已排次数预填），使新增/减少人员后该日之后的排班重新均分。不传 `start_date` 时为整月覆盖（行为不变）。`start_date` 若不在该月内则报错。
 - 约束与优先级见 [1.4 业务规则](#14-业务规则与约束不变量)。
-- 生成结果附带 `warnings`（如某天某岗位无人可排），供人工干预。
+- 生成结果附带 `warnings`（如某天某岗位无人可排），供人工干预；增量模式下另返回 `incremental=true` 与 `kept_days`（保留天数）。
 
 #### FR-7 手工调整排班
 - 在排班网格中把某人指派到某天某岗位。
@@ -175,21 +178,22 @@
 | `permissions` | `id, name, sort` | 权限字典（默认 A~E） |
 | `categories` | `id, name, perm_ids(JSON), preferred_perm_id` | 人员类别与默认权限（默认一类~六类） |
 | `rosters` | `id, name` | 名单 |
-| `persons` | `id, roster_id, name, code, phone, category_id, perm_ids(JSON), preferred_perm_id, remark` | 人员 |
+| `persons` | `id, roster_id, name, code, phone, category_id, perm_ids(JSON), preferred_perm_id, remark, status, deleted_at` | 人员；`status`=`active`/`disabled`（软删除），`deleted_at` 记录停用时间 |
 | `tasks` | `id, name, roster_id` | 排班任务（=排班表） |
 | `slots` | `id, task_id, idx, start, "end"` | 班次时段 |
 | `positions` | `id, slot_id, name, perm_id` | 岗位（perm_id 可空） |
 | `schedules` | `id, task_id, date, slot_id, position_id, person_id, cover_of`，`UNIQUE(task_id,date,position_id,person_id)` | 排班记录；`cover_of` 指向被顶班者 |
 | `attendance` | `id, person_id, date, kind, reason`，`UNIQUE(person_id,date)` | 考勤记录 |
 | `att_kinds` | `kind(PK), label, weight, unavailable, sort` | 考勤类型配置（运行期唯一来源） |
-| `settings` | `key(PK), value` | 全局设置键值对（如 `multi_shift`） |
+| `settings` | `key(PK), value` | 全局设置键值对（`multi_shift`、`show_disabled`） |
 
-**索引**（加速按日期/人员/岗位查询）：`schedules` 上 `date`、`(person_id,date)`、`(task_id,date)`、`slot_id`、`position_id`、`(date,position_id)`；`attendance` 上 `date`、`(person_id,date)`；`persons(roster_id)`、`slots(task_id)`、`positions(slot_id)`。
+**索引**（加速按日期/人员/岗位查询）：`schedules` 上 `date`、`(person_id,date)`、`(task_id,date)`、`slot_id`、`position_id`、`(date,position_id)`；`attendance` 上 `date`、`(person_id,date)`；`persons(roster_id)`、`persons(status)`、`slots(task_id)`、`positions(slot_id)`。
 
 **说明**
 - `perm_ids` 以 JSON 字符串存储（如 `[1,2,3]`）。
 - `att_kinds` 是「考勤类型」的唯一运行期来源，`normal` 恒存在。
-- `settings` 用于运行期可调规则（目前：`multi_shift`，默认 `0`）；启动时仅补默认键，不覆盖已有值。
+- `settings` 用于运行期可调规则（`multi_shift`：允许多班次；`show_disabled`：人员列表是否显示已停用者；默认均为 `0`）；启动时仅补默认键，不覆盖已有值。
+- `persons.status` 为软删除标记；旧库在启动时由 `_migrate_persons_soft_delete` **幂等补列**（自动 `ALTER TABLE`），无需手工迁移。
 - 数据库以 **WAL 模式**运行（`PRAGMA journal_mode=WAL`），提升多写并发；连接设 `busy_timeout=5000`、`synchronous=NORMAL`。
 - 无外键约束，删除时由应用层手工级联清理。
 
@@ -203,7 +207,7 @@ REST，JSON 收发。基址 `http://127.0.0.1:8686`。
 |---|---|---|
 | GET | `/api/meta` | 元数据：名单、权限、类别、考勤类型、**设置**等 |
 | GET/POST/PUT | `/api/att_kinds` | 读取/保存考勤类型配置 |
-| GET/POST/PUT | `/api/settings` | 读取/保存全局设置（如 `multi_shift`；未知键报错） |
+| GET/POST/PUT | `/api/settings` | 读取/保存全局设置（`multi_shift`、`show_disabled`；未知键报错） |
 | GET | `/api/selfcheck` | 数据一致性自检（返回 `ok/issues/checks/counts`） |
 | GET/POST | `/api/permissions` | 列出 / 新增权限 |
 | PUT/DELETE | `/api/permissions/{id}` | 重命名 / 删除权限（级联清理） |
@@ -213,10 +217,11 @@ REST，JSON 收发。基址 `http://127.0.0.1:8686`。
 | PUT/DELETE | `/api/rosters/{id}` | 重命名 / 删除名单 |
 | GET | `/api/rosters/{id}/persons` | 名单下人员 |
 | POST | `/api/persons` | 新建人员 |
-| PUT/DELETE | `/api/persons/{id}` | 编辑 / 删除人员 |
+| PUT/DELETE | `/api/persons/{id}` | 编辑 / **停用**人员（软删除，保留历史） |
+| POST | `/api/persons/{id}/restore` | **恢复**已停用人员 |
 | GET/POST | `/api/tasks` | 列出 / 新建任务 |
 | GET/PUT/DELETE | `/api/tasks/{id}` | 读取 / 编辑 / 删除任务 |
-| POST | `/api/tasks/{id}/generate` | 按月自动排班 |
+| POST | `/api/tasks/{id}/generate` | 自动排班（可带 `start_date` 做增量重排） |
 | GET | `/api/tasks/{id}/schedule` | 读取某月排班（含考勤标记） |
 | PUT | `/api/schedule/assign` | 手工指派/调整 |
 | GET/POST/DELETE | `/api/attendance` | 列出 / 录入 / 删除考勤 |
@@ -271,11 +276,13 @@ python3 dist/排班系统.pyz      # 运行（数据文件在 dist/data.db）
 python3 selftest.py            # 后端自测（业务规则/配置/分组/顶班/多班次/自检）
 ```
 
-- `selftest.py`：**69 项断言**，覆盖公平性、配置化、按排班表分组统计、顶班覆盖、多班次开关、数据自检等场景。
+- `selftest.py`：**93 项断言**，覆盖公平性、配置化、按排班表分组统计、顶班覆盖、多班次开关、数据自检、**人员软删除/恢复**、**增量重排**、**老库自动迁移**等场景。
 - 前端 E2E（可选，需 playwright-core + chromium）：
   ```bash
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/e2e.js       # 全流程回归（34 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat.js   # 设置页开关 + 自检 + 统计折叠（19 项）
+  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat2.js  # 人员停用/恢复 + 增量重排（16 项）
+  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/lazy.js      # 大数据(320行)统计懒渲染（7 项，需大数据库）
   ```
   E2E 断言**标签无关**（从 `/api/meta.att_kinds` 动态取名称/权重），可在 `A事/B事` 与 `事假/病假` 两种配置下通过。
 

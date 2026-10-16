@@ -23,6 +23,7 @@ def fresh(name):
     if os.path.exists(path):
         os.remove(path)
     db.DB_PATH = path
+    db._SETTINGS_CACHE = None
     db.init_db()
     conn = db.get_conn()
     perms = {r["name"]: r["id"] for r in conn.execute("SELECT id, name FROM permissions")}
@@ -507,6 +508,123 @@ def scenario_cover_override():
     conn.close()
 
 
+def scenario_soft_delete():
+    print("== 人员软删除（停用）与恢复")
+    conn, perms, cats = fresh("softdel.db")
+    rid = make_roster(conn, perms, cats, 6)
+    tid = make_task(perms, rid, 3)
+    sc.generate_month(tid, 2026, 10)
+    pids = [r["id"] for r in conn.execute("SELECT id FROM persons ORDER BY id")]
+    victim = pids[0]
+    before = conn.execute("SELECT COUNT(*) c FROM schedules WHERE person_id=?", (victim,)).fetchone()["c"]
+    check("停用前该人有历史排班", before > 0, "%d 班" % before)
+
+    st, data = server.delete_persons(victim)
+    check("停用接口返回成功", st == 200, str(data))
+    row = conn.execute("SELECT status, deleted_at FROM persons WHERE id=?", (victim,)).fetchone()
+    check("DB 中软删除(status=disabled)", row["status"] == "disabled" and bool(row["deleted_at"]), str(dict(row)))
+
+    hist = conn.execute("SELECT COUNT(*) c FROM schedules WHERE person_id=?", (victim,)).fetchone()["c"]
+    check("历史排班记录被保留", hist == before, "%d 班" % hist)
+
+    st, act = server.get_persons(rid)
+    check("默认人员列表不含停用者", all(p["id"] != victim for p in act), "")
+
+    db.set_setting("show_disabled", "1")
+    st, allp = server.get_persons(rid)
+    check("开启显示后可看到停用者", any(p["id"] == victim for p in allp), "")
+    db.set_setting("show_disabled", "0")
+
+    roster_ids = [p["id"] for p in sc.load_roster(conn, rid)]
+    check("排班名单排除停用者", victim not in roster_ids, str(roster_ids))
+
+    sc.generate_month(tid, 2026, 11)
+    inj = conn.execute(
+        "SELECT COUNT(*) c FROM schedules WHERE task_id=? AND person_id=? AND date LIKE '2026-11%'",
+        (tid, victim)).fetchone()["c"]
+    check("重排后停用者不再被排班", inj == 0, "%d 班" % inj)
+
+    st, data = server.restore_persons(victim)
+    check("恢复接口返回成功", st == 200, str(data))
+    row = conn.execute("SELECT status, deleted_at FROM persons WHERE id=?", (victim,)).fetchone()
+    check("恢复后 status=active 且清空删除时间", row["status"] == "active" and row["deleted_at"] is None, str(dict(row)))
+    st, act2 = server.get_persons(rid)
+    check("恢复后重新出现在人员列表", any(p["id"] == victim for p in act2), "")
+
+    server.delete_persons(victim)
+    st, d2 = server.delete_persons(victim)
+    check("重复停用被拒绝", st != 200 and "已停用" in d2.get("error", ""), str(d2))
+    st, d3 = server.restore_persons(victim)
+    check("恢复停用者成功", st == 200, str(d3))
+    st, d4 = server.restore_persons(victim)
+    check("恢复在用人员被拒绝", st != 200 and "未停用" in d4.get("error", ""), str(d4))
+    conn.close()
+
+
+def scenario_incremental():
+    print("== 增量重排（从指定日期开始，保留历史）")
+    conn, perms, cats = fresh("incr.db")
+    rid = make_roster(conn, perms, cats, 6)
+    tid = make_task(perms, rid, 3)
+    r0 = sc.generate_month(tid, 2026, 10)
+    check("整月生成 kept_days=0", r0["days"] == 31 and r0["incremental"] is False and r0["kept_days"] == 0, str(r0))
+
+    def snap():
+        return {r["date"]: r["person_id"] for r in conn.execute(
+            "SELECT date, person_id FROM schedules WHERE task_id=? ORDER BY date", (tid,))}
+    before = snap()
+    first_half = {d: p for d, p in before.items() if d <= "2026-10-15"}
+
+    conn.execute("INSERT INTO persons(roster_id,name,code,category_id,perm_ids) VALUES(?,?,?,?,?)",
+                 (rid, "NEW", "E999", cats[0], db._dumps(sorted(perms.values()))))
+    conn.commit()
+    new_id = conn.execute("SELECT id FROM persons WHERE name='NEW'").fetchone()["id"]
+
+    r1 = sc.generate_month(tid, 2026, 10, "2026-10-16")
+    check("增量标记/天数正确", r1["incremental"] is True and r1["kept_days"] == 15 and r1["days"] == 16, str(r1))
+
+    after = snap()
+    check("前半月排班完全未变", {d: p for d, p in after.items() if d <= "2026-10-15"} == first_half, "")
+    check("全月仍为 31 天", len(after) == 31, "%d" % len(after))
+    after16 = [p for d, p in after.items() if d >= "2026-10-16"]
+    check("新增人员被排入后半段", new_id in after16, "")
+
+    st, data = server.generate(tid, {"year": 2026, "month": 10, "start_date": "2026-10-16"})
+    check("server.generate 接受 start_date", st == 200 and data.get("incremental") is True, str(data))
+    st, data = server.generate(tid, {"year": 2026, "month": 10, "start_date": "2099-01-01"})
+    check("非法 start_date（跨月）被拒绝", st != 200, str(data))
+    conn.close()
+
+
+def scenario_migrate_old_db():
+    print("== 老库自动迁移（persons 补 status/deleted_at 列）")
+    import sqlite3
+    path = os.path.join(TMP, "oldlib.db")
+    if os.path.exists(path):
+        os.remove(path)
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        "CREATE TABLE persons(id INTEGER PRIMARY KEY AUTOINCREMENT, roster_id INTEGER, name TEXT, code TEXT, "
+        "phone TEXT, category_id INTEGER, perm_ids TEXT, preferred_perm_id INTEGER, remark TEXT);"
+        "INSERT INTO persons(roster_id,name) VALUES(1,'老张');"
+    )
+    raw.commit()
+    raw.close()
+
+    db.DB_PATH = path
+    db._SETTINGS_CACHE = None
+    db.init_db()  # 老库上应能成功初始化（建索引依赖 status 列）
+
+    conn = db.get_conn()
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(persons)")}
+    check("老库自动补 status/deleted_at 列", "status" in cols and "deleted_at" in cols, str(sorted(cols)))
+    idx = {r["name"] for r in conn.execute("PRAGMA index_list(persons)")}
+    check("老库自动建 idx_persons_status 索引", "idx_persons_status" in idx, str(sorted(idx)))
+    row = conn.execute("SELECT status, deleted_at FROM persons WHERE name='老张'").fetchone()
+    check("存量人员默认 active 且无删除时间", row["status"] == "active" and row["deleted_at"] is None, str(dict(row)))
+    conn.close()
+
+
 def main():
     global TMP
     TMP = tempfile.mkdtemp(prefix="workday_selftest_")
@@ -522,6 +640,9 @@ def main():
         scenario_move()
         scenario_group_and_cover()
         scenario_cover_override()
+        scenario_soft_delete()
+        scenario_incremental()
+        scenario_migrate_old_db()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

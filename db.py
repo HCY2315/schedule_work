@@ -105,6 +105,7 @@ def norm_kind(kind):
 
 DEFAULT_SETTINGS = {
     "multi_shift": "0",
+    "show_disabled": "0",
 }
 
 
@@ -159,6 +160,18 @@ def get_conn():
     return conn
 
 
+def show_disabled_enabled():
+    return get_setting("show_disabled", "0").lower() in ("1", "true", "yes", "on")
+
+
+def _migrate_persons_soft_delete(conn):
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(persons)")}
+    if "status" not in cols:
+        conn.execute("ALTER TABLE persons ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+    if "deleted_at" not in cols:
+        conn.execute("ALTER TABLE persons ADD COLUMN deleted_at TEXT")
+
+
 def init_db():
     conn = get_conn()
     # WAL：读写可并发，写锁粒度从库级降为事务级，多人同时保存不易 "database is locked"
@@ -189,7 +202,9 @@ def init_db():
             category_id INTEGER,
             perm_ids TEXT NOT NULL DEFAULT '[]',
             preferred_perm_id INTEGER,
-            remark TEXT DEFAULT ''
+            remark TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active',
+            deleted_at TEXT
         );
         CREATE TABLE IF NOT EXISTS tasks(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -255,6 +270,9 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_positions_slot   ON positions(slot_id);
         """
     )
+    # 先补齐软删除列（老库），再建依赖 status 列的索引，避免老库启动即失败
+    _migrate_persons_soft_delete(conn)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_persons_status ON persons(status)")
     _seed(conn)
     reload_att_kinds(conn)
     conn.commit()

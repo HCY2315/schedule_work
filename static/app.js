@@ -62,6 +62,7 @@ const state = {
   rosters: [],
   tasks: [],
   persons: [],
+  showDisabled: false,
   activeRosterId: null,
   scheduleTaskId: null,
   scheduleData: null,
@@ -78,7 +79,11 @@ const state = {
   statsRendered: {},
 };
 
-async function loadMeta() { state.meta = await get('/api/meta'); }
+async function loadMeta() {
+  state.meta = await get('/api/meta');
+  const s = (state.meta && state.meta.settings) || {};
+  state.showDisabled = (s.show_disabled || '0').toString().toLowerCase() === '1';
+}
 
 function attKindList() { return (state.meta && state.meta.att_kinds) || []; }
 function kindMeta(kind) {
@@ -316,6 +321,11 @@ function closeSchedule() {
   state.scheduleMsg = null;
   renderTasks();
 }
+function defaultFrom() {
+  const t = today();
+  return t.slice(0, 7) === state.month ? t : state.month + '-01';
+}
+
 function renderSchedule() {
   const tid = state.scheduleTaskId;
   const task = state.tasks.find(function (t) { return t.id === tid; });
@@ -326,7 +336,9 @@ function renderSchedule() {
     '<h3>' + esc(task ? task.name : '') + '</h3>' +
     '<span class="spacer"></span>' +
     '<label>月份</label><input type="month" id="sch-month" value="' + state.month + '" onchange="state.month=this.value;renderTasks()">' +
-    '<button class="btn primary" onclick="doGenerate()">生成本月排班</button>' +
+    '<label class="chk"><input type="checkbox" id="sch-inc"> 从指定日期开始</label>' +
+    '<input type="date" id="sch-from" value="' + defaultFrom() + '" style="width:132px">' +
+    '<button class="btn primary" onclick="doGenerate()">重新生成排班</button>' +
     '</div><div id="sched-msg"></div><div class="sched-wrap" id="sched-wrap"><div class="muted" style="padding:14px">加载中…</div></div>';
   loadScheduleGrid();
 }
@@ -392,14 +404,32 @@ function gridHTML(d) {
 async function doGenerate() {
   const parts = state.month.split('-');
   const y = Number(parts[0]), m = Number(parts[1]);
-  if (!confirm('将重新生成 ' + y + '年' + m + '月 的排班，该月已有排班会被覆盖，继续？')) return;
+  const incEl = $('#sch-inc'), fromEl = $('#sch-from');
+  const inc = !!(incEl && incEl.checked);
+  let from = incEl && fromEl ? fromEl.value : '';
+  if (inc) {
+    if (!from || from.slice(0, 7) !== state.month) {
+      toast('请选择本月内的「从指定日期开始」日期', true);
+      return;
+    }
+    const kept = (Number(from.slice(8, 10)) || 1) - 1;
+    if (!confirm('将只重新生成 ' + from + ' 至月末的排班（该月 1 日 ~ ' +
+        String(kept).padStart(2, '0') + ' 日的排班保持不变），按当前名单分配这段排班。继续？')) return;
+  } else {
+    if (!confirm('将重新生成 ' + y + '年' + m + '月 的排班，该月已有排班会被覆盖，继续？')) return;
+  }
+  const body = { year: y, month: m };
+  if (inc) body.start_date = from;
   try {
-    const r = await post('/api/tasks/' + state.scheduleTaskId + '/generate', { year: y, month: m });
+    const r = await post('/api/tasks/' + state.scheduleTaskId + '/generate', body);
+    const head = r.incremental
+      ? '已从 ' + from + ' 重新生成 ' + r.days + ' 天（保留前 ' + r.kept_days + ' 天不变）'
+      : '已生成 ' + r.days + ' 天';
     if (r.warnings && r.warnings.length) {
-      state.scheduleMsg = '已生成 ' + r.days + ' 天，但以下时段未能排满（人员/权限不足）：\n' + r.warnings.join('\n');
+      state.scheduleMsg = head + '，但以下时段未能排满（人员/权限不足）：\n' + r.warnings.join('\n');
       toast('已生成，存在未排满岗位', true);
     } else {
-      state.scheduleMsg = '已生成 ' + r.days + ' 天排班。';
+      state.scheduleMsg = head + '。';
       toast('排班已生成');
     }
     await loadScheduleGrid();
@@ -545,27 +575,48 @@ async function renderPersons() {
     return;
   }
   state.persons = persons;
+  const disabledN = persons.filter(function (x) { return x.status === 'disabled'; }).length;
+  const activeN = persons.length - disabledN;
   const rr = state.rosters.find(function (x) { return x.id === state.activeRosterId; });
-  let h = '<div class="card"><div class="toolbar"><h3>人员：' + esc(rr ? rr.name : '') + '（' + persons.length + '人）</h3>' +
-    '<span class="spacer"></span><button class="btn primary" onclick="openPersonModal(null)">+ 新增人员</button></div>';
+  let h = '<div class="card"><div class="toolbar"><h3>人员：' + esc(rr ? rr.name : '') +
+    '（在用 ' + activeN + ' 人' + (disabledN ? '，停用 ' + disabledN + ' 人' : '') + '）</h3>' +
+    '<span class="spacer"></span>' +
+    '<label class="chk"><input type="checkbox" ' + (state.showDisabled ? 'checked' : '') +
+    ' onchange="toggleShowDisabled(this.checked)">显示已停用</label>' +
+    '<button class="btn primary" onclick="openPersonModal(null)">+ 新增人员</button></div>';
   if (!persons.length) {
     h += '<div class="muted">还没有人员。点击「新增人员」录入姓名、类别与权限。</div>';
   } else {
     h += '<table class="list"><thead><tr><th>姓名</th><th>工号</th><th>电话</th><th>类别</th><th>权限</th><th>偏好权限</th><th>备注</th><th>操作</th></tr></thead><tbody>';
     persons.forEach(function (p) {
-      h += '<tr><td><b>' + esc(p.name) + '</b></td><td>' + esc(p.code) + '</td><td>' + esc(p.phone) + '</td>' +
+      const dis = p.status === 'disabled';
+      h += '<tr' + (dis ? ' class="row-disabled"' : '') + '><td><b>' + esc(p.name) + '</b>' +
+        (dis ? ' <span class="tag orange">已停用</span>' : '') + '</td><td>' + esc(p.code) + '</td><td>' + esc(p.phone) + '</td>' +
         '<td>' + esc(catName(p.category_id)) + '</td><td>' +
         (p.perm_ids || []).map(function (id) { return '<span class="tag">' + esc(permName(id)) + '</span>'; }).join('') +
         ((p.perm_ids || []).length ? '' : '<span class="muted">无</span>') +
         '</td><td>' + (esc(permName(p.preferred_perm_id)) || '<span class="muted">无</span>') + '</td>' +
         '<td>' + esc(p.remark) + '</td><td class="act">' +
-        '<button class="btn small" onclick="openPersonModal(' + p.id + ')">编辑</button> ' +
-        '<button class="btn small danger" onclick="removePerson(' + p.id + ')">删除</button></td></tr>';
+        (dis
+          ? '<button class="btn small" onclick="restorePerson(' + p.id + ')">恢复</button>'
+          : '<button class="btn small" onclick="openPersonModal(' + p.id + ')">编辑</button> ' +
+            '<button class="btn small danger" onclick="removePerson(' + p.id + ')">停用</button>') +
+        '</td></tr>';
     });
     h += '</tbody></table>';
   }
   h += '</div>';
   box.innerHTML = h;
+}
+async function toggleShowDisabled(on) {
+  state.showDisabled = on;
+  try {
+    await post('/api/settings', { show_disabled: on ? '1' : '0' });
+  } catch (e) {
+    toast('保存设置失败：' + e.message, true);
+    return;
+  }
+  await renderPersons();
 }
 function openPersonModal(pid) {
   const p = pid ? state.persons.find(function (x) { return x.id === pid; }) : null;
@@ -626,12 +677,23 @@ async function savePerson() {
 }
 async function removePerson(id) {
   const p = state.persons.find(function (x) { return x.id === id; });
-  if (!confirm('确定删除人员「' + (p ? p.name : '') + '」？其排班与考勤记录会一并删除。')) return;
+  if (!confirm('确定停用人员「' + (p ? p.name : '') + '」？\n' +
+    '停用后不会再被排班，但历史排班与考勤记录保留；可随时恢复。')) return;
   try {
     await del('/api/persons/' + id);
     await loadRosters();
     renderRoster();
-    toast('已删除');
+    toast('已停用');
+  } catch (e) { toast(e.message, true); }
+}
+
+async function restorePerson(id) {
+  const p = state.persons.find(function (x) { return x.id === id; });
+  try {
+    await post('/api/persons/' + id + '/restore', {});
+    await loadRosters();
+    renderRoster();
+    toast('已恢复「' + (p ? p.name : '') + '」');
   } catch (e) { toast(e.message, true); }
 }
 
@@ -734,6 +796,11 @@ function renderSettings() {
     ' onchange="toggleMultiShift(this.checked)"> 允许每人每天上多个不重叠班次</label>' +
     '<div class="muted" style="margin-top:6px">关闭（默认）＝每人每天最多一班，跨排班表也拦截。<br>' +
     '开启后：同一人当天可在不同排班表兼班，但<b>时间区间重叠仍会被拦截</b>；同一排班表内仍为「一人一岗（移动）」。</div></div>';
+  const showDis = ((state.meta.settings || {}).show_disabled || '0') === '1';
+  h += '<div class="card"><h3>人员显示</h3>' +
+    '<label class="ck"><input type="checkbox" id="show-disabled"' + (showDis ? ' checked' : '') +
+    ' onchange="toggleShowDisabledSetting(this.checked)"> 在人员列表中显示「已停用」人员</label>' +
+    '<div class="muted" style="margin-top:6px">停用（软删除）不会删除历史排班与考勤记录，可在人员页随时恢复。</div></div>';
   h += '<div class="card"><h3>数据自检</h3>' +
     '<div class="muted">检查孤立引用、同日冲突、时段重叠、重复底班、悬空顶班、失效权限与考勤类型等。</div>' +
     '<div style="margin-top:8px"><button class="btn" onclick="runSelfcheck()">开始自检</button></div></div>' +
@@ -757,6 +824,18 @@ async function toggleMultiShift(on) {
     if (!state.meta.settings) state.meta.settings = {};
     state.meta.settings.multi_shift = on ? '1' : '0';
     toast(on ? '已开启：每人每天可上多个不重叠班次' : '已恢复：每人每天最多一班');
+  } catch (e) {
+    toast(e.message, true);
+    renderSettings();
+  }
+}
+async function toggleShowDisabledSetting(on) {
+  try {
+    await post('/api/settings', { show_disabled: on ? '1' : '0' });
+    if (!state.meta.settings) state.meta.settings = {};
+    state.meta.settings.show_disabled = on ? '1' : '0';
+    state.showDisabled = on;
+    toast(on ? '已显示停用人员' : '已隐藏停用人员');
   } catch (e) {
     toast(e.message, true);
     renderSettings();

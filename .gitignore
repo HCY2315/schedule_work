@@ -1,0 +1,12 @@
+data.db
+data.db-journal
+data.db-wal
+data.db-shm
+__pycache__/
+*.pyc
+dist/
+build/
+*.spec
+.build_pyz/
+._*
+.idea/

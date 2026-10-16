@@ -75,6 +75,10 @@ def _int(v, default=None):
         return default
 
 
+def _now():
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 # ---------------------------------------------------------------- 权限/类别
 
 
@@ -236,7 +240,11 @@ def get_persons(rid):
     conn = get_conn()
     try:
         out = []
-        for r in conn.execute("SELECT * FROM persons WHERE roster_id=? ORDER BY id", (rid,)):
+        sql = "SELECT * FROM persons WHERE roster_id=?"
+        if not db.show_disabled_enabled():
+            sql += " AND status='active'"
+        sql += " ORDER BY id"
+        for r in conn.execute(sql, (rid,)):
             d = dict(r)
             d["perm_ids"] = _loads(d["perm_ids"])
             out.append(d)
@@ -306,11 +314,34 @@ def put_persons(pid, body):
 def delete_persons(pid):
     conn = get_conn()
     try:
-        conn.execute("DELETE FROM schedules WHERE person_id=?", (pid,))
-        conn.execute("DELETE FROM attendance WHERE person_id=?", (pid,))
-        conn.execute("DELETE FROM persons WHERE id=?", (pid,))
+        cur = conn.execute("SELECT name, status FROM persons WHERE id=?", (pid,)).fetchone()
+        if not cur:
+            return _err("人员不存在")
+        if cur["status"] == "disabled":
+            return _err("该人员已停用")
+        conn.execute(
+            "UPDATE persons SET status='disabled', deleted_at=? WHERE id=?",
+            (_now(), pid),
+        )
         conn.commit()
-        return _ok()
+        return _ok({"name": cur["name"]})
+    finally:
+        conn.close()
+
+
+def restore_persons(pid):
+    conn = get_conn()
+    try:
+        cur = conn.execute("SELECT name, status, roster_id FROM persons WHERE id=?", (pid,)).fetchone()
+        if not cur:
+            return _err("人员不存在")
+        if cur["status"] != "disabled":
+            return _err("该人员未停用，无需恢复")
+        conn.execute(
+            "UPDATE persons SET status='active', deleted_at=NULL WHERE id=?", (pid,)
+        )
+        conn.commit()
+        return _ok({"name": cur["name"]})
     finally:
         conn.close()
 
@@ -494,8 +525,9 @@ def generate(tid, body):
     month = _int(body.get("month"))
     if not year or not month or not (1 <= month <= 12):
         return _err("请指定年份和月份")
+    start_date = (body.get("start_date") or "").strip() or None
     try:
-        return _ok(sc.generate_month(tid, year, month))
+        return _ok(sc.generate_month(tid, year, month, start_date))
     except ValueError as e:
         return _err(e)
     except Exception as e:
@@ -614,6 +646,10 @@ def assign(tid, body):
         if person_id not in roster_ids:
             return _err("该人员不在此任务名单中")
         person = sc.load_person(conn, person_id)
+        if not person:
+            return _err("人员不存在", 404)
+        if person.get("status") == "disabled":
+            return _err("该人员已停用，请先恢复后再排班")
         if sc._unavailable(conn, person_id, date):
             return _err("该人员当天已登记不在岗（%s）" % absent_labels())
         if not sc._perm_ok(person, dict(pos)):
@@ -822,6 +858,8 @@ def put_settings(body):
     for k, v in body.items():
         if k == "multi_shift" and str(v).lower() not in ("0", "1", "true", "false", "on", "off", "yes", "no"):
             return _err("multi_shift 只能取 0/1")
+        if k == "show_disabled" and str(v).lower() not in ("0", "1", "true", "false", "on", "off", "yes", "no"):
+            return _err("show_disabled 只能取 0/1")
         db.set_setting(k, v)
     return _ok(dict(db.settings_map()))
 
@@ -1241,6 +1279,9 @@ def dispatch(method, path, qs, body):
                 return put_persons(int(m.group(1)), body)
             if method == "DELETE":
                 return delete_persons(int(m.group(1)))
+        m = re.fullmatch(r"/api/persons/(\d+)/restore", path)
+        if m and method == "POST":
+            return restore_persons(int(m.group(1)))
         m = re.fullmatch(r"/api/tasks/(\d+)", path)
         if m:
             if method == "GET":

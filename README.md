@@ -294,7 +294,7 @@ python3 selftest.py            # 后端自测（业务规则/配置/分组/顶�
 - 前端 E2E（可选，需 playwright-core + chromium）：
   ```bash
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/e2e.js       # 全流程回归（34 项）
-  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat.js   # 设置页开关 + 顶班多班 + 自检/修复 + 统计折叠（23 项）
+  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat.js   # 设置页开关 + 顶班多班 + 自检/修复 + 数据文件路径 + 统计折叠（25 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat2.js  # 人员停用/恢复 + 增量重排（16 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat3.js  # 新增人员默认值 + 排班表纵向布局（11 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat5.js  # 统计按月查询 + 全部月份=年（11 项）
@@ -342,6 +342,20 @@ python3 seed_demo.py --force  --db data.db                  # 清空业务数据
 4. 目前无自动备份/导出功能，建议**定期手工备份 `data.db`**。
 
 **备份建议**：停止服务后直接复制 `data.db`（如 `cp data.db data.db.bak`）即可。
+
+### 配置看起来「重启就丢了」怎么办
+
+配置本身是**持久化**的（存在 `data.db` 里）。若重启后配置变了，几乎都是**读到了另一个 `data.db`**：
+
+1. **看启动日志 / 设置页**：启动时会打印 `数据文件: /绝对路径/data.db`；「设置」页底部也有「数据文件」卡片显示当前库路径。
+   - 若该路径**每次启动都不一样**，或每次都提示「首次创建」，就说明程序位置/运行目录在变。
+2. **三种运行方式的数据文件位置不同**：
+   - 源码 `python3 server.py` → 脚本同目录 `./data.db`
+   - pyz `python3 排班系统.pyz` → **pyz 同目录** `data.db`
+   - 可执行 `./排班系统` → **可执行文件同目录** `data.db`
+   - 从**不同位置/方式**启动会各用各的库 → 配置看起来「丢了」。**固定从同一处启动**即可。
+3. 换新版本时，**把旧的 `data.db` 一起带过去**（放到程序同目录）。
+4. 不要把程序放在重启会被清空的目录（如某些临时目录）。
 
 ---
 

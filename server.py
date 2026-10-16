@@ -1359,7 +1359,8 @@ def dispatch(method, path, qs, body):
             if status != 200:
                 return status, data
             return _ok({"permissions": perms, "categories": data, "att_kinds": att_kinds(),
-                        "settings": dict(db.settings_map())})
+                        "settings": dict(db.settings_map()),
+                        "db_path": db.DB_PATH})
         if path == "/api/att_kinds":
             if method == "GET":
                 return get_att_kinds()
@@ -1516,6 +1517,7 @@ def _open_browser(url):
 
 
 def main():
+    existed = os.path.exists(db.DB_PATH)
     init_db()
     url = "http://127.0.0.1:%d" % PORT
     try:
@@ -1524,7 +1526,10 @@ def main():
         print("服务已在运行，打开浏览器: %s" % url)
         _open_browser(url)
         return
-    print("排班系统已启动: %s （Ctrl+C 停止）" % url)
+    print("排班系统已启动: %s （Ctrl+C 停止）" % url, flush=True)
+    print("数据文件: %s" % db.DB_PATH, flush=True)
+    if not existed:
+        print("  ！本次为「首次创建」：如果你每次重启都看到这句，说明配置没有被写到同一个 data.db", flush=True)
     _open_browser(url)
     try:
         server.serve_forever()

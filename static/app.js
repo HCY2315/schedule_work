@@ -866,6 +866,10 @@ function renderSettings() {
   attKindList().forEach(function (k) { h += kindRowHTML(k, false); });
   h += '</tbody></table>' +
     '<div class="muted" style="margin-top:10px">分数用于统计加权（正常×1）。「缺勤」通常为 0 分；「事假/病假」按实际折算。</div></div>';
+  if (state.meta.db_path) {
+    h += '<div class="card"><h3>数据文件</h3><div class="muted">所有配置与排班都保存在：<code>' + esc(state.meta.db_path) + '</code></div>' +
+      '<div class="muted" style="margin-top:6px">若重启后配置丢失，通常是启动的「程序位置」变了 → 读到了另一个 data.db。请固定从同一处启动，并定期备份该文件。</div></div>';
+  }
   el.innerHTML = h;
 }
 async function toggleMultiShift(on) {

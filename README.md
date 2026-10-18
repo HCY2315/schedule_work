@@ -172,6 +172,7 @@
 - **NFR-6 可测试**：提供 `selftest.py` 与 E2E 脚本。
 - **NFR-7 免缓存**：静态资源 `Cache-Control: no-store`，避免升级后浏览器读到旧页面。
 - **NFR-8 端口**：默认 `8686`，可用环境变量 `WORKDAY_PORT` 覆盖；端口被占用时视为「已在运行」并打开浏览器。
+- **NFR-9 移动端**：窄屏（≤820px / ≤480px）自适应——顶栏导航换行、双栏变单列、列表表格在卡片内横向滚动、排班表纵向滚动；手机浏览器可直接使用。
 
 ---
 
@@ -299,6 +300,7 @@ python3 selftest.py            # 后端自测（业务规则/配置/分组/顶�
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat3.js  # 新增人员默认值 + 排班表纵向布局（11 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat5.js  # 统计按月查询 + 全部月份=年（11 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat6.js  # 岗位多权限（「＋权限」弹窗选择）（12 项）
+  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/mobile.js    # 手机端(390x844)无横向溢出/单列/导航可见（10 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/lazy.js      # 大数据(320行)统计懒渲染（7 项，需大数据库）
   ```
   E2E 断言**标签无关**（从 `/api/meta.att_kinds` 动态取名称/权重），可在 `事假/病假` 等任意自定义名称下通过。

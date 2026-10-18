@@ -983,6 +983,58 @@ def scenario_att_kind_labels():
     check("旧库 A事/B事 幂等改名为 事假/病假", rows.get("a") == "事假" and rows.get("b") == "病假", str(rows))
 
 
+def scenario_avoid_repeat_slot():
+    print("== 排班规则：同任务不连续两天同班次（默认开启）")
+
+    def build(name):
+        conn, perms, cats = fresh(name)
+        allp = db._dumps(sorted(perms.values()))
+        rid = conn.execute("INSERT INTO rosters(name) VALUES(?)", (name,)).lastrowid
+        pid = conn.execute("INSERT INTO persons(roster_id,name,code,perm_ids) VALUES(?,?,?,?)",
+                           (rid, "P1", "E1", allp)).lastrowid
+        tid = conn.execute("INSERT INTO tasks(name,roster_id) VALUES(?,?)", (name, rid)).lastrowid
+        sid = conn.execute('INSERT INTO slots(task_id,idx,start,"end") VALUES(?,0,?,?)', (tid, "08:00", "16:00")).lastrowid
+        pos = conn.execute("INSERT INTO positions(slot_id,name,perm_id) VALUES(?,'岗',NULL)", (sid,)).lastrowid
+        conn.commit()
+        return conn, tid, sid, pos, pid
+
+    def ins(conn, tid, sid, pos, pid, date):
+        conn.execute(
+            "INSERT INTO schedules(task_id,date,slot_id,position_id,person_id,cover_of) VALUES(?,?,?,?,?,NULL)",
+            (tid, date, sid, pos, pid))
+        conn.commit()
+
+    conn, tid, sid, pos, pid = build("avoidon.db")
+    db.set_setting("avoid_repeat_slot", "1")
+    sc.generate_month(tid, 2026, 10)
+    days = [d["date"] for d in conn.execute("SELECT DISTINCT date FROM schedules WHERE task_id=? ORDER BY date", (tid,))]
+    gap_ok = all((datetime.date.fromisoformat(days[i + 1]) - datetime.date.fromisoformat(days[i])).days >= 2
+                 for i in range(len(days) - 1))
+    check("开启：同一人不会连续两天同一班次", 0 < len(days) < 31 and gap_ok, "天数=%d gap_ok=%s" % (len(days), gap_ok))
+    conn.close()
+
+    conn, tid, sid, pos, pid = build("avoidoff.db")
+    db.set_setting("avoid_repeat_slot", "0")
+    r = sc.generate_month(tid, 2026, 10)
+    n = conn.execute("SELECT COUNT(*) c FROM schedules WHERE task_id=?", (tid,)).fetchone()["c"]
+    check("关闭：允许每天连排", n == 31 and not r["warnings"], "n=%d warn=%d" % (n, len(r["warnings"])))
+    conn.close()
+
+    conn, tid, sid, pos, pid = build("avoidon2.db")
+    db.set_setting("avoid_repeat_slot", "1")
+    ins(conn, tid, sid, pos, pid, "2026-10-01")
+    st, err = server.assign(tid, {"date": "2026-10-02", "position_id": pos, "person_id": pid})
+    check("开启：手工指派昨天同一班次被拦截", st != 200 and "轮动" in str(err), str(err))
+    conn.close()
+
+    conn, tid, sid, pos, pid = build("avoidoff2.db")
+    db.set_setting("avoid_repeat_slot", "0")
+    ins(conn, tid, sid, pos, pid, "2026-10-01")
+    st, err = server.assign(tid, {"date": "2026-10-02", "position_id": pos, "person_id": pid})
+    check("关闭：手工指派可连着排同一班次", st == 200, str(err))
+    conn.close()
+
+
 def main():
     global TMP
     TMP = tempfile.mkdtemp(prefix="workday_selftest_")
@@ -1010,6 +1062,7 @@ def main():
         scenario_position_multi_perm()
         scenario_positions_perm_ids_migration()
         scenario_att_kind_labels()
+        scenario_avoid_repeat_slot()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

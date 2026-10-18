@@ -136,6 +136,7 @@
 - **关闭**：**每人每天最多一班**，跨任务/跨时段均拦截（原 `busy_any` 语义）。
 - **开启**：允许同一人当天在不同任务（排班表）承担**时间不重叠**的多段班次；**同一任务内仍保持「一人一岗」的移动语义**（在排班网格内调整是“移动”而非新增）。
 - **时间重叠始终拦截**（与开关无关）：同一人时间上冲突的时段不可同时排。
+- **同任务不连续两天排同一班次**（设置键 `avoid_repeat_slot`，**默认 `1`＝开启**）：开启时，自动排班与手工指派都会拦「昨天上过同一时段的人今天再上同一时段」；关闭后允许连着上同一班次。
 - **顶班允许一人一天多班**（设置键 `cover_multi_shift`，默认 `0`）：**仅影响顶班**。开启后顶班人无需让出自己当天的班，可同时保留原班并接手被顶班次（**时间不重叠**，重叠仍拦截）。**不改变自动排班算法**（仍以均匀分配为主）。
 - 开关值持久化于 `settings` 表，通过 `/api/settings` 读写；排班生成与手工指派、顶班实时读取最新值。
 
@@ -153,7 +154,7 @@
 1. **每人每天最多一班**：同一任务内恒定。当「允许多班次」（`multi_shift`）**开启（默认）**时，放宽为「**跨任务间时间不重叠即可**」；**关闭**时跨任务也拦截。无论开关如何，**时间重叠始终拦截**，且同一任务内始终「一人一岗」（见 [FR-13](#fr-13-排班规则设置可配置)）。
 2. **岗位权限匹配**：人员权限须包含岗位要求的权限（岗位权限为空=不限）。
 3. **不在岗不排班**：考勤类型 `unavailable=1` 的人员当天不参与排班。
-4. **同任务不连续两天同一班次**：昨天上过的班次，今天不排（自动排班为硬约束；顶班时放宽为软偏好）。
+4. **同任务不连续两天同一班次**：昨天上过的班次，今天不排（自动排班为硬约束；顶班时放宽为软偏好）。**可在「排班规则」关闭**（设置键 `avoid_repeat_slot`，默认开启）。
 5. **公平性**：候选排序键（越小越优先）：
    `本月已排次数 → 本时段已排次数 → 偏好匹配 → 年度总分 → 人员ID`
    - 本月已排次数为主键，保证同月内人人均分；
@@ -192,14 +193,14 @@
 | `schedules` | `id, task_id, date, slot_id, position_id, person_id, cover_of`，`UNIQUE(task_id,date,position_id,person_id)` | 排班记录；`cover_of` 指向被顶班者 |
 | `attendance` | `id, person_id, date, kind, reason`，`UNIQUE(person_id,date)` | 考勤记录 |
 | `att_kinds` | `kind(PK), label, weight, unavailable, sort` | 考勤类型配置（运行期唯一来源） |
-| `settings` | `key(PK), value` | 全局设置键值对（`multi_shift`、`show_disabled`、`cover_multi_shift`） |
+| `settings` | `key(PK), value` | 全局设置键值对（`multi_shift`、`show_disabled`、`cover_multi_shift`、`avoid_repeat_slot`） |
 
 **索引**（加速按日期/人员/岗位查询）：`schedules` 上 `date`、`(person_id,date)`、`(task_id,date)`、`slot_id`、`position_id`、`(date,position_id)`；`attendance` 上 `date`、`(person_id,date)`；`persons(roster_id)`、`persons(status)`、`slots(task_id)`、`positions(slot_id)`。
 
 **说明**
 - `perm_ids` 以 JSON 字符串存储（如 `[1,2,3]`）。
 - `att_kinds` 是「考勤类型」的唯一运行期来源，`normal` 恒存在。
-- `settings` 用于运行期可调规则（`multi_shift`：允许多班次，默认 `1`；`show_disabled`：人员列表是否显示已停用者，默认 `0`；`cover_multi_shift`：顶班允许一人一天多班，默认 `0`）；启动时仅补默认键，不覆盖已有值。
+- `settings` 用于运行期可调规则（`multi_shift`：允许多班次，默认 `1`；`show_disabled`：人员列表是否显示已停用者，默认 `0`；`cover_multi_shift`：顶班允许一人一天多班，默认 `0`；`avoid_repeat_slot`：同任务不连续两天同班次，默认 `1`）；启动时仅补默认键，不覆盖已有值。
 - `persons.status` 为软删除标记；旧库在启动时由 `_migrate_persons_soft_delete` **幂等补列**（自动 `ALTER TABLE`），无需手工迁移。
 - 旧库中占位的权限（`A~E`）与类别（`一类~六类`）会在启动时由 `_migrate_rename_placeholders` **幂等改名**为真实名称（消防/电工/急救/驾驶/厨师、管理岗~外包岗）；若目标名称已存在则跳过，不会产生重名。
 - 考勤类型占位名 `A事/B事` 由 `_migrate_att_kind_labels` 在启动时**幂等改名**为 `事假/病假`（仅当旧名存在）。
@@ -216,7 +217,7 @@ REST，JSON 收发。基址 `http://127.0.0.1:8686`。
 |---|---|---|
 | GET | `/api/meta` | 元数据：名单、权限、类别、考勤类型、**设置**等 |
 | GET/POST/PUT | `/api/att_kinds` | 读取/保存考勤类型配置 |
-| GET/POST/PUT | `/api/settings` | 读取/保存全局设置（`multi_shift`、`show_disabled`、`cover_multi_shift`；未知键报错） |
+| GET/POST/PUT | `/api/settings` | 读取/保存全局设置（`multi_shift`、`show_disabled`、`cover_multi_shift`、`avoid_repeat_slot`；未知键报错） |
 | GET | `/api/selfcheck` | 数据一致性自检（返回 `ok/issues/checks/counts`） |
 | POST | `/api/selfcheck/repair` | 一键修复悬空顶班（`cover_of` 找不到底班的孤立顶班行） |
 | GET/POST | `/api/permissions` | 列出 / 新增权限 |
@@ -291,11 +292,11 @@ python3 dist/排班系统.pyz      # 运行（数据文件在 dist/data.db）
 python3 selftest.py            # 后端自测（业务规则/配置/分组/顶班/多班次/自检）
 ```
 
-- `selftest.py`：**124 项断言**，覆盖公平性（含**时段均衡**与**缺人轮换空岗**）、配置化、按排班表分组统计、顶班覆盖、多班次开关、数据自检、**人员软删除/恢复**、**增量重排**、**老库自动迁移**、**生成的时间重叠校验**、**统计按月查询**、**顶班自检/修复**、**顶班多班开关**、**岗位多权限**、**positions 老库迁移**等场景。
+- `selftest.py`：**131 项断言**，覆盖公平性（含**时段均衡**与**缺人轮换空岗**）、配置化、按排班表分组统计、顶班覆盖、多班次开关、数据自检、**人员软删除/恢复**、**增量重排**、**老库自动迁移**、**生成的时间重叠校验**、**统计按月查询**、**顶班自检/修复**、**顶班多班开关**、**不连续同班次开关**、**岗位多权限**、**positions 老库迁移**等场景。
 - 前端 E2E（可选，需 playwright-core + chromium）：
   ```bash
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/e2e.js       # 全流程回归（34 项）
-  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat.js   # 设置页开关 + 顶班多班 + 自检/修复 + 数据文件路径 + 统计折叠（25 项）
+  E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat.js   # 设置页开关 + 顶班多班 + 不连续同班次 + 自检/修复 + 数据文件路径 + 统计折叠（29 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat2.js  # 人员停用/恢复 + 增量重排（16 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat3.js  # 新增人员默认值 + 排班表纵向布局（11 项）
   E2E_BASE=http://127.0.0.1:8686 node /tmp/opencode/pw/newfeat5.js  # 统计按月查询 + 全部月份=年（11 项）

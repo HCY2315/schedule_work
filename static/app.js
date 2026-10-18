@@ -838,10 +838,14 @@ function renderSettings() {
   const el = $('#tab-settings');
   const multi = ((state.meta.settings || {}).multi_shift || '0') === '1';
   const coverMulti = ((state.meta.settings || {}).cover_multi_shift || '0') === '1';
+  const avoidRepeat = ((state.meta.settings || {}).avoid_repeat_slot || '1') === '1';
   let h = '<div class="card"><h3>排班规则</h3>' +
     '<label class="ck"><input type="checkbox" id="multi-shift"' + (multi ? ' checked' : '') +
     ' onchange="toggleMultiShift(this.checked)"> 允许每人每天上多个不重叠班次</label>' +
     '<div class="muted" style="margin-top:6px">开启（默认）：同一人当天可在不同排班表兼班（时间不重叠）；<b>时间重叠仍拦截</b>，同一排班表内仍为「一人一岗」。关闭＝每人每天最多一班，跨排班表也拦截。</div>' +
+    '<label class="ck" style="margin-top:10px"><input type="checkbox" id="avoid-repeat"' + (avoidRepeat ? ' checked' : '') +
+    ' onchange="toggleAvoidRepeat(this.checked)"> 同任务不连续两天排同一班次</label>' +
+    '<div class="muted" style="margin-top:6px">开启（默认）：自动排班与手工指派都会拦「昨天上过同一时段的人今天再上同一时段」。关闭后允许连着上同一班次。</div>' +
     '<label class="ck" style="margin-top:10px"><input type="checkbox" id="cover-multi-shift"' + (coverMulti ? ' checked' : '') +
     ' onchange="toggleCoverMultiShift(this.checked)"> 顶班允许一人一天多班</label>' +
     '<div class="muted" style="margin-top:6px">仅影响<b>顶班</b>：开启后顶班人无需让出自己当天的班，可同时保留原班并接手被顶班次（<b>时间不重叠</b>，重叠仍拦截）。<b>不影响自动排班算法</b>（仍以均匀分配为主）。</div></div>';
@@ -878,6 +882,17 @@ async function toggleMultiShift(on) {
     if (!state.meta.settings) state.meta.settings = {};
     state.meta.settings.multi_shift = on ? '1' : '0';
     toast(on ? '已开启：每人每天可上多个不重叠班次' : '已恢复：每人每天最多一班');
+  } catch (e) {
+    toast(e.message, true);
+    renderSettings();
+  }
+}
+async function toggleAvoidRepeat(on) {
+  try {
+    await post('/api/settings', { avoid_repeat_slot: on ? '1' : '0' });
+    if (!state.meta.settings) state.meta.settings = {};
+    state.meta.settings.avoid_repeat_slot = on ? '1' : '0';
+    toast(on ? '已开启：同任务不连续两天排同一班次' : '已关闭：允许连着上同一班次');
   } catch (e) {
     toast(e.message, true);
     renderSettings();

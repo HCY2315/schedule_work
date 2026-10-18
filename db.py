@@ -116,6 +116,7 @@ DEFAULT_SETTINGS = {
     "multi_shift": "1",
     "show_disabled": "0",
     "cover_multi_shift": "0",
+    "avoid_repeat_slot": "1",
 }
 
 
@@ -158,6 +159,10 @@ def multi_shift_enabled():
 
 def cover_multi_shift_enabled():
     return get_setting("cover_multi_shift", "0").lower() in ("1", "true", "yes", "on")
+
+
+def avoid_repeat_slot_enabled():
+    return get_setting("avoid_repeat_slot", "1").lower() in ("1", "true", "yes", "on")
 
 
 def hhmm(minutes):

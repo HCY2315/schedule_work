@@ -689,7 +689,8 @@ def assign(tid, body):
             "SELECT slot_id FROM schedules WHERE task_id=? AND date=? AND person_id=?",
             (tid, yd, person_id),
         ).fetchone()
-        if yrow and yrow["slot_id"] == pos["slot_id"] and not (cur and cur["person_id"] == person_id):
+        if (db.avoid_repeat_slot_enabled() and yrow and yrow["slot_id"] == pos["slot_id"]
+                and not (cur and cur["person_id"] == person_id)):
             return _err("该人员昨天上的是同一班次，需保持轮动")
 
         conn.execute(
@@ -886,6 +887,8 @@ def put_settings(body):
             return _err("show_disabled 只能取 0/1")
         if k == "cover_multi_shift" and str(v).lower() not in ("0", "1", "true", "false", "on", "off", "yes", "no"):
             return _err("cover_multi_shift 只能取 0/1")
+        if k == "avoid_repeat_slot" and str(v).lower() not in ("0", "1", "true", "false", "on", "off", "yes", "no"):
+            return _err("avoid_repeat_slot 只能取 0/1")
         db.set_setting(k, v)
     return _ok(dict(db.settings_map()))
 

@@ -10,6 +10,7 @@ from db import (
     att_kinds_map,
     multi_shift_enabled,
     cover_multi_shift_enabled,
+    avoid_repeat_slot_enabled,
 )
 
 
@@ -342,6 +343,7 @@ def _generate_day(conn, task, roster, date, slot_ids, gen_count, slot_count):
     yslots = _yesterday_slots(conn, task["id"], date)
     scores = year_scores(conn)
     multi = multi_shift_enabled()
+    avoid_repeat = avoid_repeat_slot_enabled()
     day_busy = load_day_busy(conn, date)
     available = [p for p in roster if not _unavailable(conn, p["id"], date)]
     assigned = set()
@@ -350,7 +352,7 @@ def _generate_day(conn, task, roster, date, slot_ids, gen_count, slot_count):
         pid = p["id"]
         if not _perm_ok(p, pos):
             return False
-        if pid in assigned or yslots.get(pid) == sid:
+        if pid in assigned or (avoid_repeat and yslots.get(pid) == sid):
             return False
         if multi:
             return not has_conflict(
@@ -453,7 +455,7 @@ def suggest_covers(conn, task_id, date, position_id, limit=None):
         if not _perm_ok(p, pos):
             continue
         busy = has_conflict(day_busy.get(p["id"], []), slot["start"], slot["end"], multi=allow_multi)
-        risky = yslots.get(p["id"]) == slot["id"]
+        risky = avoid_repeat_slot_enabled() and yslots.get(p["id"]) == slot["id"]
         out.append(
             {
                 "person_id": p["id"],

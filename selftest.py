@@ -1035,6 +1035,31 @@ def scenario_avoid_repeat_slot():
     conn.close()
 
 
+def scenario_settings_persist():
+    print("== 设置项显式落库并跨重启持久")
+    conn, perms, cats = fresh("setpersist.db")
+    conn.close()
+
+    def snap():
+        c = db.get_conn()
+        d = {r["key"]: r["value"] for r in c.execute("SELECT key, value FROM settings")}
+        c.close()
+        return d
+
+    check("建库即把所有设置项写入 settings 表", set(db.DEFAULT_SETTINGS) <= set(snap()), str(snap()))
+    db.set_setting("multi_shift", "0")
+    db._SETTINGS_CACHE = None
+    db.init_db()
+    check("改动后的值跨重启保留（不被默认覆盖）", snap().get("multi_shift") == "0", str(snap()))
+    c = db.get_conn()
+    c.execute("DELETE FROM settings WHERE key='avoid_repeat_slot'")
+    c.commit()
+    c.close()
+    db._SETTINGS_CACHE = None
+    db.init_db()
+    check("缺失项启动时补回默认", snap().get("avoid_repeat_slot") == "1", str(snap()))
+
+
 def main():
     global TMP
     TMP = tempfile.mkdtemp(prefix="workday_selftest_")
@@ -1063,6 +1088,7 @@ def main():
         scenario_positions_perm_ids_migration()
         scenario_att_kind_labels()
         scenario_avoid_repeat_slot()
+        scenario_settings_persist()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

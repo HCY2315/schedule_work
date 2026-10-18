@@ -330,6 +330,7 @@ def init_db():
     _migrate_positions_perm_ids(conn)
     _seed(conn)
     _migrate_att_kind_labels(conn)
+    _seed_settings(conn)
     reload_att_kinds(conn)
     conn.commit()
     conn.close()
@@ -362,6 +363,11 @@ def _seed(conn):
                 "INSERT INTO att_kinds(kind, label, weight, unavailable, sort) VALUES(?,?,?,?,?)",
                 (kind, v["label"], v["weight"], 1 if v["unavailable"] else 0, i),
             )
+
+
+def _seed_settings(conn):
+    for k, v in DEFAULT_SETTINGS.items():
+        conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (k, v))
 
 
 def _dumps(v):
